@@ -161,6 +161,18 @@ func TestDomainRuleCases(t *testing.T) {
 			app("internal/assistant/sample", "", ""), map[string]string{"internal/assistant/sample/sample_test.go": "package sample\n\n" +
 				"import (\n\t\"github.com/nwverse/persona/server/internal/agentref\"\n\t\"github.com/nwverse/persona/server/internal/" +
 				"agentref/agentrefadapt\"\n)\n\nfunc wire(r agentref.Ref) { _ = agentrefadapt.Wire(r) }\n"}), []string{}},
+		// A call written as a statement drops its results when the parsed declarations say it has some: another
+		// core's method, an interface method; one they cannot tell (the standard library's, a name declared both
+		// ways) is left alone.
+		{"calls written as statements in a core", merged(fleet, core("import \"github.com/nwverse/persona/server/internal/agentref\"\n\n"+
+			"// Tag is a tag. The zero Tag is none.\ntype Tag struct{ tag uint8 }\n\n"+
+			"// next is what follows a tag.\ntype next interface{ following() Tag }\n\n"+
+			"func skip(n next, r agentref.Ref) {\n\tr.IsSame(r)\n\tn.following()\n}\n")),
+			[]string{"core-outcome-return", "core-outcome-return"}},
+		{"calls the declarations cannot resolve pass", core("import \"strings\"\n\n" +
+			"// Tag is a tag. The zero Tag is none.\ntype Tag struct{ tag uint8 }\n\nfunc (t Tag) mark() {}\n\n" +
+			"// marker is something marked.\ntype marker interface{ mark() Tag }\n\n" +
+			"func keep(m marker, raw string) {\n\tstrings.ToUpper(raw)\n\tm.mark()\n}\n"), []string{}},
 		{"a library importing the kit", pkgFiles("internal/lib", "library",
 			"import \"github.com/nwverse/persona/server/internal/domainkit/instant\"\n\nvar zero instant.Instant\n"),
 			[]string{"layer-library"}},

@@ -3,6 +3,7 @@ package domainrules
 import (
 	"go/ast"
 	"go/token"
+	"maps"
 	"strings"
 )
 
@@ -63,6 +64,8 @@ type coreChecks struct {
 	p   *Pkg
 	idx Index
 	kit bool // the kit: every core rule, with what kitAPI lists left out
+
+	ownMethods methodNames // this package's and the kit's method names, once outcomes needs them
 }
 
 // Core is the rules for p's own code, by its layer: the core rules for cores, shared kernels and the kit (with what
@@ -888,9 +891,10 @@ func (c *coreChecks) partNames(f *File) {
 }
 
 // outcomes is core-outcome-return on one file: every return of an outcome sets it, no outcome is built by literal,
-// and no call's result is discarded with _.
+// and no call's result is discarded, whether with _ or by a call written as a statement (dropped).
 func (c *coreChecks) outcomes(f *File) {
 	outcomeName := c.idx.kitName(f, "outcome")
+	imports, methods := c.idx.imports(f), c.methodResults(f)
 	for _, d := range f.ast.Decls {
 		fd, ok := d.(*ast.FuncDecl)
 		name := declName(d)
@@ -916,9 +920,120 @@ func (c *coreChecks) outcomes(f *File) {
 						}
 					}
 				}
+			case *ast.ExprStmt:
+				if call, ok := ast.Unparen(x.X).(*ast.CallExpr); ok && c.dropped(call, imports, methods) {
+					c.at(f, x, "core-outcome-return", name+" calls "+exprString(callee(call))+
+						" as a statement and drops what it returns")
+				}
 			}
 			return true
 		})
+	}
+}
+
+// callee is the function a call names, its type arguments removed: ParseTitle for ParseTitle[T](x).
+func callee(call *ast.CallExpr) ast.Expr {
+	fun := ast.Unparen(call.Fun)
+	switch x := fun.(type) {
+	case *ast.IndexExpr:
+		return ast.Unparen(x.X)
+	case *ast.IndexListExpr:
+		return ast.Unparen(x.X)
+	}
+	return fun
+}
+
+// dropped says whether a call written as a statement throws away a result, as far as the declarations the rules
+// parsed tell: it calls a function of this package, or of the kit or a core or shared kernel the file imports
+// (imports, by the names the file uses), that has results; or a method by a name that this package, the kit and the
+// cores the file imports declare only with results (methods). A call the declarations cannot resolve (the standard
+// library's, a func value's) is left alone.
+func (c *coreChecks) dropped(call *ast.CallExpr, imports map[string]Import, methods map[string]bool) bool {
+	switch fun := callee(call).(type) {
+	case *ast.Ident:
+		return funcResults(c.p.decls, fun.Name)
+	case *ast.SelectorExpr:
+		if id, ok := ast.Unparen(fun.X).(*ast.Ident); ok {
+			if imp, ok := imports[id.Name]; ok {
+				p := c.idx.pkg(imp.Path)
+				return p != nil && p.decls != nil && c.idx.domain(imp.Path) && funcResults(p.decls, fun.Sel.Name)
+			}
+		}
+		return methods[fun.Sel.Name]
+	}
+	return false
+}
+
+// funcResults says whether d declares a top-level function by that name with results.
+func funcResults(d *decls, name string) bool {
+	for _, fd := range d.funcs {
+		if fd.decl.Name.Name == name {
+			return results(fd.decl.Type)
+		}
+	}
+	return false
+}
+
+// results says whether a function type returns anything.
+func results(ft *ast.FuncType) bool { return ft.Results != nil && len(ft.Results.List) > 0 }
+
+// methodResults is, for f, the method names declared only with results (on a type or in an interface) across this
+// package, the kit and the cores and shared kernels f imports: a call of one of them as a statement drops a result
+// whatever its receiver, as far as those declarations tell. A name any of them also declares without results is
+// left out, since the receiver's type would decide.
+func (c *coreChecks) methodResults(f *File) map[string]bool {
+	if c.ownMethods.with == nil {
+		c.ownMethods = methodNames{with: map[string]bool{}, without: map[string]bool{}}
+		c.ownMethods.add(c.p.decls)
+		for _, p := range c.idx.pkgs {
+			if p != c.p && c.idx.layer(p.Path) == layerKit {
+				c.ownMethods.add(p.decls)
+			}
+		}
+	}
+	names := methodNames{with: maps.Clone(c.ownMethods.with), without: maps.Clone(c.ownMethods.without)}
+	for _, imp := range f.Imports {
+		if p := c.idx.pkg(imp.Path); p != nil && p != c.p && core(c.idx.layer(imp.Path)) {
+			names.add(p.decls)
+		}
+	}
+	for n := range names.without {
+		delete(names.with, n)
+	}
+	return names.with
+}
+
+// methodNames is method names by whether a declaration of each has results.
+type methodNames struct{ with, without map[string]bool }
+
+// add records d's methods and interface methods; a package not parsed in full adds nothing.
+func (m methodNames) add(d *decls) {
+	if d == nil {
+		return
+	}
+	mark := func(name string, ft *ast.FuncType) {
+		if results(ft) {
+			m.with[name] = true
+		} else {
+			m.without[name] = true
+		}
+	}
+	for _, fds := range d.methods {
+		for _, fd := range fds {
+			mark(fd.decl.Name.Name, fd.decl.Type)
+		}
+	}
+	for _, t := range d.order {
+		if t.iface == nil {
+			continue
+		}
+		for _, field := range t.iface.Methods.List {
+			if ft, ok := field.Type.(*ast.FuncType); ok {
+				for _, n := range field.Names {
+					mark(n.Name, ft)
+				}
+			}
+		}
 	}
 }
 

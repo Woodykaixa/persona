@@ -434,7 +434,11 @@ func (s *Service) MarkDone(w http.ResponseWriter, id string) {
 
 An expected failure is a value: a fallible core API returns `outcome.Of[T, F]` through a named result, `return
 out.Ok(v)` or `return out.Err(f)` on every path, and an outcome nobody set raises a defect wherever it is read. No
-core discards what a call returns. Each core seals one failure family on the kit's bases:
+core discards what a call returns, with `_` or by writing the call as a statement: a value changes only by becoming
+the next value, so `all.With(f)` alone loses the failure `all = all.With(f)` keeps. The check resolves a call through
+the declarations it parses (the package's own, the kit's and those of the cores it imports); a call of the standard
+library, of a func value, or of a method name those declarations also give without results is left alone. Each core
+seals one failure family on the kit's bases:
 
 ```go
 // Fail is every failure agentref returns. The zero Fail is nil; no Parse returns it as a failure.
@@ -642,7 +646,7 @@ run that does not name the baseline with `--only` leaves it out once main has it
 | `core-wire-method` | `Wire` only on a one-field struct, returning the field | the package |
 | `core-constructor` | exported functions are Parse, New, Restore, builder entries, `<Type><Value>` or domain services; Parse and New make their package's type | the package |
 | `core-params` | four parameters at most | the package |
-| `core-outcome-return` | every return sets the outcome, no outcome literal, no discarded call result, in a core or the kit | the package |
+| `core-outcome-return` | every return sets the outcome, no outcome literal, no call result discarded with `_` or dropped by a call statement (one the package, the kit or an imported core declares with results), in a core or the kit | the package |
 | `core-fail-family` | one sealed `Fail` family, and every failure type in it | the package |
 | `core-part-name` | a `fail.NewPart` name has no underscore | the package |
 | `core-visitor-name` | every visitor method starts with `Visit` | the package |

@@ -54,15 +54,20 @@ func (o Of[T, F]) IsOk() bool { return o.held("outcome.IsOk") == value }
 
 // held is which side o holds; an unset o is a defect.
 func (o Of[T, F]) held(op string) set {
+	o.expectSet(op)
+	return o.set
+}
+
+// expectSet raises a defect, naming op, when o is unset: a reader that needs no side still never reads an unset o.
+func (o Of[T, F]) expectSet(op string) {
 	if o.set == unset {
 		defect.Raise(op, "an unset outcome: its producer returned without Ok or Err")
 	}
-	return o.set
 }
 
 // Unpack is o's value and failure; exactly one of them is set (the failure is nil when o holds a value).
 func Unpack[T any, F fail.Fail](o Of[T, F]) (T, F) {
-	o.held("outcome.Unpack")
+	o.expectSet("outcome.Unpack")
 	return o.value, o.failure
 }
 
