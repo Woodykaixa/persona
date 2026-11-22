@@ -479,9 +479,14 @@ testkit, nothing calls its `Parse` or `Restore`; nothing outside it builds its t
 included: `var x pkg.T` names the documented zero), converts into them, aliases them, dot-imports the package, or
 reads them with `unsafe` or `reflect` (`reflect.DeepEqual` aside). An adapter returns nothing, core values (as
 outcomes), contracts, `db` rows, prompt inputs, its `Record`, `error`, or `Log`'s string, which goes straight into a
-log call. It hands out nothing else through its parameters either: what it writes through a pointer, slice, map or
-channel, passes to a callback or to an interface it declares is one of those (`Act`'s `save func(Record) error`), and
-no exported struct of its own but `Record` has an exported field. It exports no type named like one of its core's.
+log call; a pointer, slice, map or channel of them holds only them, a map's keys included. It hands out nothing else
+through its parameters either: what it writes through a pointer, slice, map or channel, passes to a callback or to an
+interface it declares is one of those (`Act`'s `save func(Record) error`). It takes no parameter of type `any`,
+`interface{}` or a type parameter, which can carry a pointer to anything; no exported struct of its own but `Record`
+has an exported field, and it has no exported variable, a getter any caller can also replace. An interface of another
+package, such as the `io.Writer` or `http.ResponseWriter` an answer is written to, is the one way out the rule does
+not read: what an adapter writes there is a review's to check, and the adapter's signature still names the domain
+value it starts from. It exports no type named like one of its core's.
 
 ```go
 // FromWire is the session a wire reference names.
@@ -664,10 +669,11 @@ run that does not name the baseline with `--only` leaves it out once main has it
 | `out-rules-import` | only tests import `domainrules` | fails at once |
 | `out-log-use` | an adapter's `Log` result only as an argument of a logging call | the package it is in |
 | `adapter-name` | an adapter exports no type named like one of its core's | the adapter |
-| `adapter-exported-result` | an adapter hands out only what the section above lists, in results, through parameters and in exported fields | the adapter |
+| `adapter-exported-result` | an adapter hands out only what the section above lists, in results (a map's keys included), through parameters (none of type `any`, `interface{}` or a type parameter) and in exported fields; it has no exported variable | the adapter |
 | `app-exported-record` | exported structs with an exported field, in undeclared, application and library packages (contracts, `db` and `prompts` aside) | the package |
 | `app-named-primitive` | named basic types, in undeclared, application and library packages | the package |
 | `app-lifecycle-write` | assignments to a `DoneAt` or `DoneBy` field, in undeclared, application and library packages | the package |
+| `app-bridge-call` | uses of an adapter's `Wire` function, called or passed on, in undeclared, application and library packages' production code | the package |
 
 The `app-*` counts hold the habits this model replaces from spreading in code that has not moved yet, and a new
 package starts at zero; they run only in `TestDomainLayers`, as does `layer-declared`.

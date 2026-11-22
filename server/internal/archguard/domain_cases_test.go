@@ -153,6 +153,14 @@ func TestDomainRuleCases(t *testing.T) {
 			"// Tell tells v nothing.\nfunc (g Tag) Tell(v agentref.RefVisitor) {}\n")), []string{"core-interface-param"}},
 		{"the hub importing a core", merged(fleet, app("internal/hub", fleetImport, "var badge = fleetcount.SurfaceBadge()\n")),
 			[]string{"path-no-core"}},
+		// An adapter's Wire hands application code a domain value's raw shape, called or passed on; tests are not counted.
+		{"an adapter's Wire passed on in undeclared code", merged(fleet, plantedDirs(t, "internal/agentref/agentrefadapt"),
+			map[string]string{"internal/legacy/legacy.go": "package legacy\n\nimport \"github.com/nwverse/persona/server/internal/" +
+				"agentref/agentrefadapt\"\n\nvar unwrap = agentrefadapt.Wire\n"}), []string{"app-bridge-call", "layer-declared"}},
+		{"an adapter's Wire in a test passes", merged(fleet, plantedDirs(t, "internal/agentref/agentrefadapt"),
+			app("internal/assistant/sample", "", ""), map[string]string{"internal/assistant/sample/sample_test.go": "package sample\n\n" +
+				"import (\n\t\"github.com/nwverse/persona/server/internal/agentref\"\n\t\"github.com/nwverse/persona/server/internal/" +
+				"agentref/agentrefadapt\"\n)\n\nfunc wire(r agentref.Ref) { _ = agentrefadapt.Wire(r) }\n"}), []string{}},
 		{"a library importing the kit", pkgFiles("internal/lib", "library",
 			"import \"github.com/nwverse/persona/server/internal/domainkit/instant\"\n\nvar zero instant.Instant\n"),
 			[]string{"layer-library"}},

@@ -62,3 +62,14 @@ func (s *Service) MarkDone(w http.ResponseWriter, id string) {
 func (s *Service) settled(_ context.Context, agent agentref.Ref) {
 	slog.Info("turn settled", "agent", agentrefadapt.Log(agent))
 }
+
+// turnSettled is a settled turn the wire reports: its reference becomes the domain value once, at the edge, and goes
+// on as it, so nothing here unwraps it again.
+func (s *Service) turnSettled(ctx context.Context, w http.ResponseWriter, ref assistantwire.SessionRef) {
+	agent, f := outcome.Unpack(agentrefadapt.FromWire(ref))
+	if f != nil {
+		failhttp.Write(w, f)
+		return
+	}
+	s.settled(ctx, agent)
+}

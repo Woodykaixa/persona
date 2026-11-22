@@ -2,6 +2,7 @@ package domainrules
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 )
 
@@ -375,6 +376,11 @@ func (c *outsideChecks) adapterDecls() {
 		}
 		c.exportedFields(t)
 	}
+	for _, v := range d.values {
+		if v.tok == token.VAR && exported(v.name.Name) {
+			c.at(v.file, v.name, "adapter-exported-result", c.p.Rel, c.p.Name+"."+v.name.Name+" is an exported variable")
+		}
+	}
 	check := func(fd *funcDecl) {
 		if !exported(fd.decl.Name.Name) || fd.recv != "" && !exported(fd.recv) {
 			return
@@ -384,9 +390,14 @@ func (c *outsideChecks) adapterDecls() {
 				c.at(fd.file, fd.decl.Name, "adapter-exported-result", c.p.Rel, fd.name()+" returns "+exprString(r))
 			}
 		}
+		tps := typeParams(fd.decl)
 		for _, p := range params(fd.decl.Type.Params) {
-			for _, out := range c.handedBack(p) {
-				if exprString(unwrapParam(out)) != "error" && !c.handedOut(fd.file, out) {
+			for _, out := range c.handedBack(p, tps) {
+				switch {
+				case out == nil:
+					c.at(fd.file, fd.decl.Name, "adapter-exported-result", c.p.Rel,
+						fd.name()+" can hand out any value through "+exprString(p))
+				case !c.handsOutOnly(fd.file, out):
 					c.at(fd.file, fd.decl.Name, "adapter-exported-result", c.p.Rel,
 						fd.name()+" hands out "+exprString(out)+" through "+exprString(p))
 				}
@@ -424,11 +435,13 @@ func (c *outsideChecks) exportedFields(t *typeDecl) {
 }
 
 // handedBack is what an adapter can hand its caller through a parameter of type p: what a pointer, slice, map or
-// channel it can send on holds, written into it; what a callback takes; and what the methods of an interface take,
-// called on it. A type the adapter declares counts as the type it is declared as. A value of any other type hands
-// nothing back, and nor does an interface of another package, such as the http.ResponseWriter an HTTP answer is
-// written to.
-func (c *outsideChecks) handedBack(p ast.Expr) []ast.Expr {
+// channel it can send on holds, written into it (a map's keys included); what a callback takes; and what the methods
+// of an interface take, called on it. A type the adapter declares counts as the type it is declared as. A nil entry
+// stands for any value at all: a parameter of type any, interface{} or a type parameter (tps) can carry a pointer to
+// anything, which the adapter can assert and write through. A value of any other type hands nothing back, and nor
+// does an interface of another package, such as the io.Writer or http.ResponseWriter an answer is written to: what
+// goes into it is not read by the rule (docs/server/architecture.md "Data objects and adapters").
+func (c *outsideChecks) handedBack(p ast.Expr, tps map[string]bool) []ast.Expr {
 	seen := map[string]bool{}
 	var back func(p ast.Expr) []ast.Expr
 	back = func(p ast.Expr) []ast.Expr {
@@ -453,8 +466,22 @@ func (c *outsideChecks) handedBack(p ast.Expr) []ast.Expr {
 		case *ast.FuncType:
 			return params(x.Params)
 		case *ast.InterfaceType:
-			return methodParams(x)
+			if len(x.Methods.List) == 0 {
+				return []ast.Expr{nil}
+			}
+			var out []ast.Expr
+			for _, m := range x.Methods.List {
+				if ft, ok := m.Type.(*ast.FuncType); ok {
+					out = append(out, params(ft.Params)...)
+				} else {
+					out = append(out, back(m.Type)...) // an embedded interface: any, the adapter's own or a sink
+				}
+			}
+			return out
 		case *ast.Ident:
+			if x.Name == "any" || tps[x.Name] {
+				return []ast.Expr{nil}
+			}
 			if t := c.p.decls.types[x.Name]; t != nil && t.strct == nil && !seen[x.Name] {
 				seen[x.Name] = true
 				return back(t.spec.Type)
@@ -465,36 +492,63 @@ func (c *outsideChecks) handedBack(p ast.Expr) []ast.Expr {
 	return back(p)
 }
 
-// methodParams is the parameters of an interface's methods.
-func methodParams(it *ast.InterfaceType) []ast.Expr {
-	var out []ast.Expr
-	for _, m := range it.Methods.List {
-		if ft, ok := m.Type.(*ast.FuncType); ok {
-			out = append(out, params(ft.Params)...)
-		}
-	}
-	return out
-}
-
 // adapterResult says whether an adapter may return a type: an outcome, a value of a core, shared kernel or the kit,
-// a contract, a db row or prompt input, its own Record, an error, or Log's string.
+// a contract, a db row or prompt input, its own Record, an error, or Log's string; or a pointer, slice, array, map or
+// channel of these, a map's keys included.
 func (c *outsideChecks) adapterResult(fd *funcDecl, r ast.Expr) bool {
-	t := unwrapParam(r)
-	switch exprString(t) {
-	case "error":
-		return true
-	case "string":
+	if exprString(r) == "string" {
 		return fd.recv == "" && fd.decl.Name.Name == "Log" && len(params(fd.decl.Type.Results)) == 1
 	}
-	return c.handedOut(fd.file, t)
+	return c.handsOutOnly(fd.file, r)
+}
+
+// handsOutOnly says whether every type a value of type t holds (handedParts) is one an adapter may hand out: an error,
+// or a type handedOut allows. A map hands out its keys as well as its values.
+func (c *outsideChecks) handsOutOnly(f *File, t ast.Expr) bool {
+	for _, part := range handedParts(t) {
+		if exprString(part) != "error" && !c.handedOut(f, part) {
+			return false
+		}
+	}
+	return true
+}
+
+// handedParts is the types a value of type t gives whoever holds it: t itself, or what a pointer, slice, array, map
+// (its keys and its values) or channel holds, all the way down.
+func handedParts(t ast.Expr) []ast.Expr {
+	switch x := t.(type) {
+	case *ast.ParenExpr:
+		return handedParts(x.X)
+	case *ast.StarExpr:
+		return handedParts(x.X)
+	case *ast.ArrayType:
+		return handedParts(x.Elt)
+	case *ast.Ellipsis:
+		return handedParts(x.Elt)
+	case *ast.MapType:
+		return append(handedParts(x.Key), handedParts(x.Value)...)
+	case *ast.ChanType:
+		return handedParts(x.Value)
+	}
+	return []ast.Expr{t}
 }
 
 // handedOut says whether an adapter may hand a type out, in a result or as a kit type's argument: its own Record, or
 // a type of a core, shared kernel, contract, db or prompts, or of the kit when every type argument is one of these
-// too. So outcome.Of[agentref.Ref, agentref.Fail] and opt.Option[[]fleetcount.Agent] pass, and outcome.Of[string,
-// fail.Fail] and opt.Option[[]string] are raw values one layer out.
+// too, all the way down (handedParts). So outcome.Of[agentref.Ref, agentref.Fail] and opt.Option[[]fleetcount.Agent]
+// pass, and outcome.Of[string, fail.Fail], opt.Option[[]string] and opt.Option[map[string]fleetcount.Agent] are raw
+// values one layer out.
 func (c *outsideChecks) handedOut(f *File, t ast.Expr) bool {
-	t = unwrapParam(t)
+	for _, part := range handedParts(t) {
+		if !c.handedOutType(f, part) {
+			return false
+		}
+	}
+	return true
+}
+
+// handedOutType is handedOut on one type that holds no other (handedParts).
+func (c *outsideChecks) handedOutType(f *File, t ast.Expr) bool {
 	if exprString(t) == "Record" {
 		return true
 	}

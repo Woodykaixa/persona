@@ -407,6 +407,8 @@ func countWhat(rule string) string {
 		return "an exported-field record"
 	case "app-named-primitive":
 		return "a named primitive type"
+	case "app-bridge-call":
+		return "a use of an adapter's Wire, which unwraps a domain value in application code"
 	}
 	return "a direct write of DoneAt or DoneBy"
 }

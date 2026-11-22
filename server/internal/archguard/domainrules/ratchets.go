@@ -9,15 +9,15 @@ import (
 // production code has, and the names that make it up.
 type Count struct {
 	Key   string // the package, under the root
-	Rule  string // app-exported-record, app-named-primitive or app-lifecycle-write
+	Rule  string // app-exported-record, app-named-primitive, app-lifecycle-write or app-bridge-call
 	N     int
-	Names []string // what was counted: type names, or file:line for writes
+	Names []string // what was counted: type names, or file:line for writes and calls
 	Pos   token.Position
 }
 
-// counted are the application habits the counts hold: exported-field records, named primitive types and direct
-// writes of an item's done state.
-var counted = []string{"app-exported-record", "app-named-primitive", "app-lifecycle-write"}
+// counted are the application habits the counts hold: exported-field records, named primitive types, direct writes
+// of an item's done state, and the domain values application code unwraps through an adapter's Wire.
+var counted = []string{"app-exported-record", "app-named-primitive", "app-lifecycle-write", "app-bridge-call"}
 
 // Ratchets is the app-* counts of every undeclared, application or library package (contracts, db and prompts left
 // out for records): it parses their production files in full. A library is counted as application code is, so
@@ -41,8 +41,19 @@ func Ratchets(pkgs []*Pkg, idx Index) ([]Count, error) {
 			if err := f.parse(); err != nil {
 				return nil, err
 			}
+			imports := idx.imports(f)
 			ast.Inspect(f.ast, func(n ast.Node) bool {
 				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					// An adapter's Wire, called or passed on, hands application code the raw shape of a domain value.
+					if id, ok := x.X.(*ast.Ident); ok && x.Sel.Name == "Wire" {
+						if imp, ok := imports[id.Name]; ok && idx.layer(imp.Path) == layerAdapter {
+							c := cs["app-bridge-call"]
+							c.N++
+							pos := f.pos(x)
+							c.Names = append(c.Names, pos.Filename+":"+itoa(pos.Line))
+						}
+					}
 				case *ast.TypeSpec:
 					if x.Assign != 0 {
 						return true

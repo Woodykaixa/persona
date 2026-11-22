@@ -346,6 +346,11 @@ var rules = map[string]ruleText{
 		"declare a value object in a core",
 		planted + "internal/agentref/ref.go",
 	},
+	"app-bridge-call": {
+		"legacy callers shrink as their code moves behind adapters",
+		"pass the domain value on, or move the conversion into the adapter",
+		planted + "internal/agentref/agentrefadapt",
+	},
 	"app-lifecycle-write": {
 		"a done state written field by field takes its own meaning at every writer",
 		"call the item's own transition (its done or reopen behaviour), or move the lifecycle into a core",
