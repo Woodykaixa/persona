@@ -44,6 +44,7 @@ internal/assistant app-lifecycle-write 30
 internal/assistant app-named-primitive 21
 internal/assistant app-named-primitive ModelPurposeStatusCode #12300 #12307
 internal/assistant app-named-primitive launcherFit #12300 #12307
+internal/assistant app-named-primitive repoMirrorProblem #13223
 internal/assistant app-named-primitive taskWorkflowKind #12286
 internal/assistant/archiverecovery app-exported-record 3
 internal/assistant/archiverecovery app-named-primitive 1
