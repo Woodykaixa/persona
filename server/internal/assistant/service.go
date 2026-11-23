@@ -71,8 +71,10 @@ type Options struct {
 // Service is the assistant. It implements Handler.
 type Service struct {
 	// modules are the feature modules loaded (modules.go); nil, none.
-	modules          *kernel.Kernel
-	compactRecovery  compactRecoveryCache
+	modules         *kernel.Kernel
+	compactRecovery compactRecoveryCache
+	// sendFanout: whom each conversation woke with conversation_send lately (conversation_fanout.go).
+	sendFanout       sendFanout
 	logical          logicalDeviceState
 	a2aWake          chan struct{}
 	a2aLogicalWrites chan struct{}
@@ -320,6 +322,7 @@ type Service struct {
 	outbound   outboundOnce      // outbound_once.go: one card per hand-off the owner is asked about, none again once allowed
 	dtree      directionTreeBook // direction_tree.go: the direction tree the apps were last told of
 	tview      todoViewBook      // todo_view_push.go: what the apps were told each to-do is filed under
+	trevision  todoRevisionBook  // todo_revision.go: the pushed read's cheap validator
 	offers     routeBook         // route.go: the directions offered for New chats
 	standing   standingBoard     // feishu_board.go: the standing "waiting for you" card
 	workbench  workbenchState    // feishu_workbench_pin.go: the pinned workbench

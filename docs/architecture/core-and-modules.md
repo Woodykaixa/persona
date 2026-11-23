@@ -53,13 +53,35 @@ stay stored, its routine facts are gone (the routine opens with none), and its t
 yet. Routes, tools, feature flags and loops are not served yet, so no module adds any; a module that declares one is
 not loaded. Each of those parts of the contract holds from the PR that serves its slot.
 
+## Classification
+
+`schema/module-classification.txt` (#13843) is the one list of what is Persona Core and what belongs to a module. It
+classifies every unit as `core` or a module id: each Go package directory under `server/` and `sdk/go/`, each Apple
+directory `apple/<name>`, `apple/Persona/<name>` and `apple/Packages/<name>`, each Gradle project
+`android/settings.gradle.kts` includes, and each directory under `web/src` one and two levels deep. A unit that is a
+module's future home gets the module id even while it still lives in a core path (`server/internal/lark` is `lark`), so
+the list shows how far each module is from its own directory.
+
+One line per unit, `<kind> <unit> <core|module id>`, with `module <id>` lines declaring the ids (#13430 section 2 plus
+the modules already built). The most specific line wins. `<dir>/... <id>` gives a whole subtree to a module, and the
+module roots (`server/internal/modules/*/...`, `web/src/modules/*`, `:module:*`) give each directory below them the
+module its name says. Core is never inherited: each core unit has its own line, so nothing becomes core without
+someone writing it down. A line may also name a directory deeper than the units (`apple/Persona/Views/Mail mail`).
+
+`scripts/test/test_module_classification.py` (run by `scripts/ci/scripts.sh`) fails on a unit no line classifies and on
+a line that matches nothing. To add a package, directory or Gradle project, add its line; to move one into a module
+root, delete its old line (the root's line classifies the new place); `--print` lists every unit with its class. The
+Apple module ratchet (`scripts/test/test_apple_module_refs.py`) takes the directories of the modules it guards from the
+file; the server, web and Android guards still key on their module roots.
+
 ## Server
 
 | Piece | Where | What it is |
 | --- | --- | --- |
 | Module API | `server/internal/modapi` | Pure types: `Info` (the manifest), `Module` (`Info()` + `Register(Host)`), `Host` (everything a module may use of the core) and the contribution types. A contract package (`server/internal/archguard/testdata/contracts.txt`) |
 | Modules | `server/internal/modules/<id>` | One package per module, with its `module.json` (embedded: `Info()` reads it). No nested Go modules |
-| Composition root | `server/internal/modules/all` | The one list of built-in modules, one file per module with its build constraint. `internal/manager` and `internal/managercli` link it |
+| Composition root | `server/internal/modules/all` | The one list of built-in modules, one file per module with its build constraint. `internal/manager`, `internal/managercli` and the binaries `cmd/personad` and `cmd/persona-manager` link it |
+| Provider seams | `server/internal/builtinext` | What the core needs of a module that runs as a built-in extension program, declared by the core and provided by the composition root (see "Provider seams") |
 | Host | `server/internal/assistant/kernel` | Loads the modules compiled in and switched on, serves `modapi.Host` to each, and answers the core's questions about what they added |
 
 The core asks the kernel (`s.modules` in package assistant, `server/internal/assistant/modules.go`), never a module's
@@ -93,13 +115,86 @@ missing quietly.
   out. `go build -tags persona_core_only ./...` must pass. `scripts/ci/server.sh build` builds both and runs, with each
   tag, the module and kernel tests and a `-run` subset of `internal/assistant` (Brief, Module, Setting, Routine, Facts,
   ScheduledConfiguration, NorthStar, Accept, Later, Golden): the assistant's tests of the briefing itself skip
-  (`needsBriefingModule`), and `TestBuildWithoutBriefingLoadsNone` checks the core without it. The whole package passes
-  with both tags too (about 9 minutes each, too long for the lane).
+  (`needsBriefingModule`), and `TestBuildWithoutBriefingLoadsNone` checks the core without it. Every server package
+  passes with `persona_core_only` too: the `core-node`, `core-managers` and `core-other` lanes run the whole suite
+  with it ("How to build and run the core alone" below).
 - **At run time**: the settings row `modules` (the `settings` table, as every other setting; no state file) holds
   `{"disabled": ["<id>", …]}`. The manager reads it once where it starts (`server/internal/assistant/main.go`,
   `ReadModuleSwitch`) and hands it to `assistant.New` as `Options.ModulesOff`, so a change takes effect at the next
   start. A module switched off is absent exactly as one left out of the build. There is no screen or tool for the row
   yet: the settings registry of #13395 is its intended home.
+
+### How to build and run the core alone
+
+Persona Core is a product on its own: a hub built without any module starts, serves and passes the core's tests.
+
+- **Build**: `cd server && go build -tags persona_core_only -o ../bin/ ./cmd/personad ./cmd/persona-hub ./cmd/persona-manager`.
+  One module left out: `-tags persona_without_<id>`.
+- **Run**: the core-only `persona-hub run` (or `personad hub run`) with a `hub.json` as for any hub (docs/operations/config.md);
+  keep `persona-manager` beside `persona-hub` and the hub starts it. The manager's log says `modules: loaded none`
+  (a default build: `modules: loaded briefing, voice, volc`, …).
+- **Smoke test**: `python3 scripts/ci/core-only-smoke.py` builds the three programs with `persona_core_only`, starts a
+  disposable `postgres:18-alpine` container on a private port, writes a `hub.json` in a temporary home and runs
+  `persona-hub run` with a clean environment (no `PERSONA_HOME` of the machine's own hub). It checks health, an
+  authenticated request, the manager's `modules: loaded none`, that every module's program (`builtinext.AddProgram` in
+  `internal/modules/all`) is an unknown subcommand of `personad` and `persona-manager`, that its extension is not in
+  `/api/v1/extensions` and `/api/v1/extensions/<id>/-/assistant-data` answers 404, and a clean SIGTERM shutdown, then
+  prints one PASS / FAIL / TIMEOUT line. `--full` runs the same on a default build and expects the opposite. `DOCKER`
+  names another Docker client.
+- **Tests**: `GOFLAGS="-trimpath -tags=persona_core_only" python3 scripts/ci/server-shards.py <node|managers|other>
+  --database-file <file with database_url>` runs a shard's every package without modules; a test of a module's own
+  behaviour skips without it (`needsBriefingModule`, `needsVoiceModule`, `needsVolcModule`). Locally the `other` shard
+  needs Bun 1.4.2 on `PATH`, as in CI.
+- **CI** (`scripts/ci/server.sh`): the `build` lane runs 'Core-only hub smoke' and 'Builds without each module' (each
+  `server/internal/modules/<id>/module.json`: `go build -tags persona_without_<id> ./...` and the module list and guard
+  tests, so a module that moves is covered with no edit); the `core-node`, `core-managers` and `core-other` lanes (and
+  `all`) run 'Server <shard> tests with Postgres, core only'. Measured on the hub machine (64 cores, shared): node
+  about 5.5 minutes, managers about 6, other about 3.5.
+- **Size**: `python3 scripts/diag/core_size.py [--no-build] [--json] <ref> …` prints the core's non-test Go lines (every
+  `*.go` under `server/` that is not `_test.go`, `server/internal/modules/` left out), each module's lines, and the
+  stripped sizes of `personad`, `persona-hub` and `persona-manager` built by default and with `persona_core_only`
+  (`go build -trimpath -ldflags '-s -w'`, the same for both). Read from `git archive`, so no checkout changes.
+
+| Ref | Core non-test lines | Module lines | personad default / core-only | persona-hub | persona-manager default / core-only |
+| --- | --- | --- | --- | --- | --- |
+| `9fa299334` (before modules moved) | 842,284 | briefing 173 | 118,911,239 / 118,898,951 B | 40,755,463 B | 100,917,511 / 100,909,319 B |
+| `2da914f99` (voice and volc moved) | 825,432 | briefing 173, voice 15,132, volc 3,259 | 119,030,023 / 117,809,415 B | 40,792,327 B | 101,007,623 / 99,791,111 B |
+
+`persona-hub` has no module in it, so both of its builds are the same size.
+
+### Provider seams
+
+Some modules are not code the manager runs but a built-in extension's program: `volc` is `personad volc` and `voice`
+is `personad voice`, which the extension host (`internal/extmgr`) starts and which reach the hub only through its API. The core needs two things of
+such a module, and it declares them in `server/internal/builtinext` in its own terms, never as the module's types:
+
+- the program a subcommand runs (`builtinext.AddProgram`, `LookupProgram`; `personad`'s usage lists the programs the
+  build has);
+- what the extension host needs of the extension: for `volc` its ids and its form's choices (`builtinext.Volc`); for
+  `voice` its transcription contribution's id and how its settings merge, which the host reads to say what the
+  extension lacks (`builtinext.Voice`).
+
+The module's file in `server/internal/modules/all` provides them in its `init`, under the module's build constraint.
+With the module left out nothing is provided: the subcommand is unknown and the extension host registers no such
+extension, exactly as before the extension existed (`TestNoVolcWithoutItsModule`, `TestNoVoiceWithoutItsModule`). Such a module registers nothing
+with the kernel yet; its `module.json` declares no slot. `scripts/ci/server.sh build` builds and tests the binaries,
+`builtinext`, the modules, the guards, the extension host's tests of them and the manager's end-to-end meeting
+transcription tests with `persona_core_only`, `persona_without_volc` and `persona_without_voice`.
+
+Mail (`server/internal/modules/mail`, #13936) is the other kind: a service the extension manager runs in process
+(the `/api/v1/mail/` routes, the `mail_*` tools and the mail connector, the Inbox's mail, the `mail.accounts` setting).
+The manager reaches it through the contract `server/internal/mailwire` (the values both sides pass and the `Service`
+interface; the module aliases them) and the port `server/internal/extmgr/mailport`: the module's file in
+`server/internal/modules/all` provides `mail.Open` there in its `init`, and the manager opens mail with it when it runs.
+The port is a package of its own so the composition root need not import `extmgr`. With the module left out
+(`persona_without_mail`, `persona_core_only`) nothing is provided and the manager runs as with a mail service that
+failed to open: the mail routes answer 404, no `mail_*` tool or mail connector is offered, `persona_settings` has no
+`mail.accounts`, and everything else runs (`TestManagerWithoutMail`). The module registers nothing with the kernel and
+its `module.json` declares no slot; the run-time switch (the `modules` row) does not cover it until the kernel serves
+`hub_routes` and `mcp_tools` (#13844). Its prompts (`server/internal/prompts/mcp/mail`) and locales (`mail-*`) stay in
+the core's trees until `prompt_sections` and `i18n_namespaces` are served. `scripts/ci/server.sh build` builds and
+tests the core, the modules, the guards and the manager's mail, inbox, connector and settings tests with
+`persona_core_only` and with `persona_without_mail`.
 
 ### Guards
 
@@ -109,13 +204,20 @@ platform compiles cannot hide a violation (`TestModuleGuardsSeeEveryBuild` prove
 
 - **`TestCoreImportsNoModule`**: no package outside `internal/modules` imports `internal/modules/…`, except the composition
   roots listed in `testdata/module_roots.txt`, which import only `internal/modules/all`. A core package's tests may
-  import `internal/modules/all` to run as the manager does (`internal/assistant/modules_link_test.go`), and nothing
-  else of `internal/modules`. Known violations would go into `testdata/module_imports_baseline.txt`, which only shrinks
+  import `internal/modules/all` to run as the manager does (`internal/assistant/modules_link_test.go`), and a module's
+  stand-in, `internal/modules/<id>/<id>test`, a fake of the outside service the module's program talks to (the
+  extension host's tests run `personad volc` against `volctest`); nothing else of `internal/modules`. Known violations would go into `testdata/module_imports_baseline.txt`, which only shrinks
   (a stale line fails); it is empty.
-- **`TestModulesUseOnlyTheSPI`**: every file of a module, tests included, imports only the standard library, `modapi` and
-  the other contract packages (pure, so nothing more comes with them), its own packages, and the modules its
-  `module.json` needs. A module it only wants may be left out of the build (`persona_without_<id>`), so it is reached
+- **`TestModulesUseOnlyTheSPI`**: every file of a module, tests included, imports only the standard library, third-party
+  packages, `modapi` and the other contract packages (pure, so nothing more comes with them), the leaf libraries, its
+  own packages, and the modules its `module.json` needs. A module it only wants may be left out of the build (`persona_without_<id>`), so it is reached
   through the kernel, never imported. Each module directory has a `module.json` whose id is the directory's name.
+- **`TestLibrariesAreLeaves`**: the leaf libraries (`testdata/libraries.txt`) are the core's packages a module may use
+  that hold no state and own no feature (localization, the extension SDK, small helpers). Each depends only on the
+  standard library, third-party packages, the contracts and the other libraries, so a module that uses one reaches no
+  manager, hub, node, store or module. A library is added only when a module needs it and it passes this test.
+- **`TestStandInsHoldNoModuleCode`**: a stand-in imports only what a library may, never its module, so the core tests
+  that use it reach none of the module's code.
 - **`TestContractsArePure`** covers `modapi` like every contract package, and the hub's
   `TestHubDoesNotImportTheManager` (`server/internal/hub/architecture_guard_test.go`) forbids `internal/modules`.
 - `scripts/test/test_module_schema.py` checks every `module.json` against `schema/module.schema.json`, refuses invalid
@@ -137,6 +239,28 @@ assistant and move as the host learns to serve them.
   star's lines alone; the acceptance reminders wait for no briefing; `assistant.briefing_waits` is hidden from
   `persona_settings` but stays stored. `server/internal/assistant/modules_test.go` covers each of these.
 
+### Volcengine speech
+
+`volc` (`server/internal/modules/volc`, #13431) is the Volcengine speech provider module, apart from voice (#13430
+section 2): the program `personad volc` and its stand-in service `volctest` (docs/extensions/volcengine-speech.md). The
+extension host keeps the extension's manifest, its meetings switch and its settings text (`internal/extmgr/volc_extension.go`),
+from what the module provides through `builtinext`; its catalog strings (`hub-volc_extension.*`, `volc-*`) stay in the
+hub's locales.
+
+### Voice
+
+`voice` (`server/internal/modules/voice`, #13431) is full-duplex voice: the program `personad voice`, which also serves
+the built-in meeting transcription contribution (`gpt-live`), and its stand-in upstream `voicetest`
+(docs/assistant/voice.md). The core keeps the generic seam: the extension host's `transcription` point, which any
+extension may contribute to, and the meeting transcription the assistant chooses; the built-in default is whatever the
+voice module provides (`builtinext.Voice`), and without the module there is none, so a meeting transcribes with a
+chosen extension or on the phone. The apps' composer dictation is core; the extension's GPT-Live dictation mode
+(docs/assistant/voice.md 4.18) goes with the module, and apps use it only while the extension advertises its
+`dictation` feature. Still in the core and named by string, to move as the host serves their slots: the channel kind
+(`channel.KindVoice`), `assistantwire.PluginsVoice`, the `voice` and `speech` extension points, the extension host's
+glue (`internal/extmgr/voice_extension.go`) and the `hub-voice_extension.*` strings; `internal/transcribelive`, a
+measuring tool that also reads the knowledge base, stays where it is.
+
 ### How to add a module
 
 1. Pick the id from #13430 section 2 and check its manifest needs only slots the kernel serves; if it needs another,
@@ -144,8 +268,9 @@ assistant and move as the host learns to serve them.
 2. Create `server/internal/modules/<id>/` with `module.json` (validated by `schema/module.schema.json`), a `Module` whose
    `Info()` reads it and whose `Register` adds what it declares. Import only `modapi`, contract packages and the modules
    it needs (never one it only wants).
-3. Add `server/internal/modules/all/<id>.go` with `//go:build !persona_without_<id> && !persona_core_only`, and the id to
-   `want_default_test.go` there.
+3. Add `server/internal/modules/all/<id>.go` with `//go:build !persona_without_<id> && !persona_core_only`, and
+   `want_<id>_test.go` there under the same constraint, adding the id to `wantModules`. A module that runs as a
+   built-in extension program provides what the core needs of it there too ("Provider seams").
 4. In the core, replace each direct call with a question to the kernel (`s.modules`), and define what happens when the
    module is absent; test both.
 5. Run the archguard tests, the tagged builds and `scripts/test/test_module_schema.py`.
@@ -155,7 +280,16 @@ assistant and move as the host learns to serve them.
 Each client documents its side in its own platform doc; these are pointers only.
 
 - **Apple** (#13432): `PersonaHostApp` with `PersonaModuleAPI` and `PersonaModule<Name>` packages. See `docs/apple/` (written with #13432).
+  A module the hub may turn off declares `feature` = `module.<id>`; the app follows the rule agreed on #13844 (off only
+  when the hello has the marker `modules` and lacks the flag; remembered per hub before the hello). See
+  `docs/apple/ios.md`, "Modules" (#13849).
 - **Android** (#13433): `:core:moduleapi` and `:module:<id>`. See `docs/android/` (written with #13433).
-- **Web** (#13434): a module host (planned as web/src/core/module-host.ts) and `web/src/modules/<id>/`. See `docs/web/` (written with #13434).
+- **Web** (#13434, #13846): the module host `web/src/core/module-host.ts` and `web/src/modules/<id>/`, serving routes,
+  sidebar entries, chat slots, Settings categories and card renderers. See `docs/web/web.md` ("Modules").
+
+**Hub flags.** Every client switches modules on the hub's hello the same way (agreed on #13844): a module's `feature`
+is `module.<id>`; a hub that publishes module flags also announces the marker `modules`; a module with a `feature` is
+off only when the hello has `modules` and lacks the module's flag. No hello yet, or an older hub without `modules`,
+leaves it on.
 
 Every client reads the same manifest fields from `schema/module.schema.json`.
