@@ -188,7 +188,14 @@ func (n *Node) serveSock(ctx context.Context, c net.Conn) {
 	case "claude-plugin.status": // which sessions' Persona plugin polls this node (ccplugin.go): installers, doctor
 		resp = n.ccPluginStatusNow()
 	case "ping": // personad node doctor, persona-link node switch: a round trip that changes nothing
-		resp = map[string]any{"ok": true, "program": n.Program, "version": n.Version}
+		n.mu.Lock()
+		machine := n.machineID
+		n.mu.Unlock()
+		pong := map[string]any{"ok": true, "program": n.Program, "version": n.Version}
+		if machine != "" {
+			pong["machine_id"] = machine
+		}
+		resp = pong
 	case "update.inventory":
 		var target nodeclient.UpdateInventoryTarget
 		if err := json.Unmarshal(req.Input, &target); err != nil {
@@ -204,6 +211,15 @@ func (n *Node) serveSock(ctx context.Context, c net.Conn) {
 		resp = n.handleAsk(ctx, req)
 	case "notify": // personad notify (scriptcli.go)
 		resp = n.handleNotify(ctx, req)
+	case "direction.create", "direction.progress": // personad create-direction / write-progress
+		var out map[string]any
+		if err := n.peer.Call(ctx, req.Kind, req.Input, &out); err != nil {
+			resp = map[string]any{"status": "unavailable", "error": err.Error()}
+		} else if out == nil {
+			resp = map[string]any{"status": "unavailable", "error": "unknown kind"}
+		} else {
+			resp = out
+		}
 	case assistantwire.MethodDecisionRaise, assistantwire.MethodDecisionGet, assistantwire.MethodDecisionWithdraw:
 		resp = n.handleDecision(ctx, req) // personad decision: non-blocking, never spooled
 	case "launcher.env": // personad launch <name>
@@ -1002,7 +1018,7 @@ func toolSummary(name string, input json.RawMessage) string {
 // leader's task_plan and task_review (assistant/task_leader.go) and task_spawn. The manager's come from the list it
 // reads itself, so a tool it adds there gets its caller here too (#9089: the repository tools were added to one list
 // only, and every agent's call of them reached the hub with no session).
-var callerTools = slices.Concat(assistantwire.AgentToolNames, assistantwire.A2AToolNames, []string{"dispatch_start", "dispatch_read", "task_plan", "task_review", "task_spawn", "secret_store"})
+var callerTools = slices.Concat(assistantwire.AgentToolNames, assistantwire.A2AToolNames, []string{"resource_status", "resource_acquire", "resource_get", "resource_renew", "resource_release", "resource_cancel", "dispatch_start", "dispatch_read", "task_plan", "task_review", "task_spawn", "secret_store"})
 
 // mcpCaller is the session an MCP call of tool name goes to the hub with: the one it names, else, for an agent's
 // tools that need to know whose call it is (callerTools), the session its pane runs. The rest go on as before, with

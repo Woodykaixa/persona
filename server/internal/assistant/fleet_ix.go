@@ -485,7 +485,7 @@ func (s *Service) await(ctx context.Context, p *pending) (proto.Resolution, erro
 	s.fleet.mu.Lock()
 	if p.prepared != nil {
 		s.fleet.mu.Unlock()
-		return s.awaitPrepared(ctx, p)
+		return s.awaitPrepared(ctx, p, false)
 	}
 	if p.resolved == nil {
 		p.resolved = make(chan struct{})
@@ -1498,6 +1498,8 @@ func (s *Service) restoreRoute(ctx context.Context, ix proto.Interaction) bool {
 	if !routable(ix) {
 		return false
 	}
+	s.supervise.routingMu.Lock()
+	defer s.supervise.routingMu.Unlock()
 	ladder, todo, home, ok := s.askLadder(ctx, ix)
 	if !ok {
 		return false
