@@ -61,9 +61,13 @@ func (n *Node) assistantLarkEnvNamed(cwd, session string) (env []string, release
 	_ = os.MkdirAll(bin, 0o755)
 	space := assistantSpace(cwd)
 	inSpace := identity.SpaceOf(cwd) != ""
+	remote := n.isRemoteRuntimeSession(session)
 	gp := n.gates()
 	if inSpace {
 		gp.markSpace(session) // larkCheck decides the conversation's space by this, not by the directory a hook runs in
+	}
+	if remote {
+		gp.markRemote(session)
 	}
 	var bases []string // the addresses opened for this process
 	env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "PERSONA_ASSISTANT_BIN=" + bin,
@@ -98,7 +102,7 @@ func (n *Node) assistantLarkEnvNamed(cwd, session string) (env []string, release
 			if g.Relay && g.SocketEnv != "" {
 				held[g.SocketEnv] = true // the manager's machine's socket: the proxy relays there (#12904)
 			}
-			b, done, err := gp.openIn(g.Command, session, inSpace) // the proxy holds a space process's writes to the phone
+			b, done, err := gp.openIn(g.Command, session, inSpace, remote) // the proxy holds space/remote writes to the phone
 			if err != nil {
 				// Its credentials stay out all the same: without the base too, the command fails plainly.
 				n.logger.Printf("assistant: %s: gate proxy: %v", g.Command, err)
@@ -149,11 +153,15 @@ func (n *Node) assistantLarkEnvNamed(cwd, session string) (env []string, release
 		env = append(env, larkProfileEnvName+"="+cfg.CLI.Profile)
 	}
 	name = func(id string) {
+		isRemote := remote || n.isRemoteRuntimeSession(id)
 		for _, b := range bases {
-			gp.nameAddr(b, id)
+			gp.nameAddr(b, id, isRemote)
 		}
 		if inSpace {
 			gp.markSpace(id)
+		}
+		if isRemote {
+			gp.markRemote(id)
 		}
 	}
 	return env, release, name

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,18 +121,41 @@ func (n *Node) assistantMemoryTool(_ context.Context, tool, session string, raw 
 	}
 
 	if tool == toolMemoryRead {
-		_, target, err := resolveMemoryTarget(dir, args.Name, false)
+		resolvedDir, _, lstatInfo, err := resolveMemoryTarget(dir, args.Name, false)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return proto.TextResult("", false)
 			}
 			return proto.TextResult("Cannot read memory file: "+err.Error(), true)
 		}
-		data, err := os.ReadFile(target)
+		root, err := os.OpenRoot(resolvedDir)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return proto.TextResult("", false)
 			}
+			return proto.TextResult("Cannot open memory directory: "+err.Error(), true)
+		}
+		defer root.Close()
+		f, err := openKnowledgeFile(root, args.Name)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return proto.TextResult("", false)
+			}
+			return proto.TextResult("Cannot read memory file: "+err.Error(), true)
+		}
+		defer f.Close()
+		opened, err := f.Stat()
+		if err != nil {
+			return proto.TextResult("Cannot read memory file: "+err.Error(), true)
+		}
+		if !opened.Mode().IsRegular() {
+			return proto.TextResult("Cannot read memory file: memory note target must be a regular file", true)
+		}
+		if lstatInfo != nil && !os.SameFile(lstatInfo, opened) {
+			return proto.TextResult("Cannot read memory file: memory note target changed during open", true)
+		}
+		data, err := io.ReadAll(io.LimitReader(f, memoryToolCap+1))
+		if err != nil {
 			return proto.TextResult("Cannot read memory file: "+err.Error(), true)
 		}
 		if len(data) > memoryToolCap {
@@ -144,7 +168,7 @@ func (n *Node) assistantMemoryTool(_ context.Context, tool, session string, raw 
 		return proto.TextResult(string(data), false)
 	}
 
-	resolvedDir, target, err := resolveMemoryTarget(dir, args.Name, true)
+	resolvedDir, target, _, err := resolveMemoryTarget(dir, args.Name, true)
 	if err != nil {
 		return proto.TextResult("Cannot write memory file: "+err.Error(), true)
 	}
@@ -171,6 +195,9 @@ func (n *Node) assistantMemoryTool(_ context.Context, tool, session string, raw 
 	if err := tmp.Close(); err != nil {
 		return proto.TextResult("Cannot flush memory file: "+err.Error(), true)
 	}
+	if st, err := os.Lstat(target); err == nil && !st.Mode().IsRegular() {
+		return proto.TextResult("Cannot write memory file: memory note target must be a regular file", true)
+	}
 	if err := os.Rename(tmpPath, target); err != nil {
 		return proto.TextResult("Cannot commit memory file: "+err.Error(), true)
 	}
@@ -179,41 +206,41 @@ func (n *Node) assistantMemoryTool(_ context.Context, tool, session string, raw 
 }
 
 // resolveMemoryTarget resolves the memory directory through any user-configured symlink and ensures
-// the note file itself stays inside it without traversing a symlinked note target.
-func resolveMemoryTarget(dir, name string, create bool) (string, string, error) {
+// the note file itself is a regular file (or absent when creating) inside it.
+func resolveMemoryTarget(dir, name string, create bool) (string, string, os.FileInfo, error) {
 	if create {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 	} else if _, err := os.Lstat(dir); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		if !create && errors.Is(err, os.ErrNotExist) {
-			return "", "", errors.New("memory directory symlink target does not exist")
+			return "", "", nil, errors.New("memory directory symlink target does not exist")
 		}
-		return "", "", err
+		return "", "", nil, err
 	}
 	dinfo, err := os.Stat(resolvedDir)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if !dinfo.IsDir() {
-		return "", "", errors.New("memory directory path is not a directory")
+		return "", "", nil, errors.New("memory directory path is not a directory")
 	}
 	target := filepath.Join(resolvedDir, name)
 	rel, err := filepath.Rel(resolvedDir, filepath.Clean(target))
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) || strings.ContainsRune(rel, filepath.Separator) {
-		return "", "", errors.New("invalid memory file path")
+		return "", "", nil, errors.New("invalid memory file path")
 	}
 	info, err := os.Lstat(target)
 	if err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || info.IsDir() {
-			return "", "", errors.New("symlinks and directories are not allowed as memory note targets")
+		if !info.Mode().IsRegular() {
+			return "", "", nil, errors.New("memory note target must be a regular file")
 		}
 	} else if !create || !errors.Is(err, os.ErrNotExist) {
-		return "", "", err
+		return "", "", nil, err
 	}
-	return resolvedDir, target, nil
+	return resolvedDir, target, info, nil
 }

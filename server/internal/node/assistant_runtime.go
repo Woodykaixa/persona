@@ -139,6 +139,8 @@ func (n *Node) assistantSendRuntime(ctx context.Context, h *runtimeConn, id, cwd
 		return "", errRuntimeAway(launcher)
 	}
 	supportsPolicy := h.supervisionPolicy()
+	remote := h.remoteAgent()
+	wasRemote := st.RemoteAgent
 	if !supportsPolicy && policy != "" {
 		if err := n.runtimePolicyDropped(ctx, id); err != nil {
 			return "", err
@@ -184,11 +186,15 @@ func (n *Node) assistantSendRuntime(ctx context.Context, h *runtimeConn, id, cwd
 			st.SupervisionInstructions = policy
 		}
 	}
+	if remote {
+		st.RemoteAgent = true
+		n.gates().markRemote(id)
+	}
 	n.noteModes(id, mode, pickedEffort)
 	if m := n.assistantModeOf(id); m != "" {
 		turn["mode"] = m
 	}
-	if !known || st.Launcher != launcher || st.Cwd != cwd || hasInput && st.TaskExecution != strict || (startedNew && supportsPolicy && policy != "") {
+	if !known || st.Launcher != launcher || st.Cwd != cwd || hasInput && st.TaskExecution != strict || (startedNew && supportsPolicy && policy != "") || (remote && !wasRemote) {
 		if st.StartedAt.IsZero() {
 			st.StartedAt = time.Now().UTC()
 		}

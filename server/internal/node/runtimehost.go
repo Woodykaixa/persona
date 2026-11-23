@@ -456,6 +456,10 @@ func (rh *RuntimeHost) request(ctx context.Context, h *runtimeConn, method strin
 			return n.saveMailAttachment(ctx, p.Args, p.SessionID, assistant, n.guestOf(p.SessionID) != nil), nil
 		}
 		if g := n.gateTool(p.Name); assistant && g != nil {
+			if h.remoteAgent() {
+				rh.reg.markRemote(p.SessionID)
+				n.gates().markRemote(p.SessionID)
+			}
 			return n.assistantGateTool(ctx, g, p.SessionID, p.Args), nil
 		}
 		if isMemoryTool(p.Name) {

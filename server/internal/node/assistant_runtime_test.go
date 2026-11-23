@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -997,7 +998,7 @@ func TestRemoteAgentMemoryToolsAndPlanMode(t *testing.T) {
 		t.Fatalf("expected oversized write to fail: %+v", res)
 	}
 
-	// Symlinks inside the memory directory must be refused.
+	// Symlinks and directories inside the memory directory must be refused.
 	memDir := n.memoryDir(cwd)
 	symPath := filepath.Join(memDir, "link.md")
 	_ = os.WriteFile(filepath.Join(t.TempDir(), "outside.md"), []byte("secret"), 0o600)
@@ -1008,6 +1009,16 @@ func TestRemoteAgentMemoryToolsAndPlanMode(t *testing.T) {
 		if res := callMemory("memory_write", map[string]any{"name": "link.md", "content": "nope"}); !res.IsError {
 			t.Fatalf("expected symlink write to fail: %+v", res)
 		}
+	}
+	dirTarget := filepath.Join(memDir, "dir.md")
+	if err := os.MkdirAll(dirTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if res := callMemory("memory_read", map[string]any{"name": "dir.md"}); !res.IsError || len(res.Content) == 0 || !strings.Contains(res.Content[0].Text, "regular file") {
+		t.Fatalf("expected directory read to fail with regular file error: %+v", res)
+	}
+	if res := callMemory("memory_write", map[string]any{"name": "dir.md", "content": "nope"}); !res.IsError || len(res.Content) == 0 || !strings.Contains(res.Content[0].Text, "regular file") {
+		t.Fatalf("expected directory write to fail with regular file error: %+v", res)
 	}
 
 	// Plan mode permits memory_read and refuses memory_write.
@@ -1354,4 +1365,191 @@ func TestRemoteAgentMemoryToolsSymlinkDirAndWorkspaceScoping(t *testing.T) {
 	if !res.IsError || len(res.Content) == 0 || !strings.Contains(res.Content[0].Text, "assistant workspace") {
 		t.Fatalf("expected empty cwd to fail closed without falling back to assistant dir, got: %+v", res)
 	}
+}
+
+func TestRemoteAgentConfirmWritesPersistsAcrossDisconnectOwnershipChangeAndRestart(t *testing.T) {
+	t.Setenv("PERSONA_SKILLS_DIR", t.TempDir())
+	t.Setenv("PERSONA_PLUGIN_SKILLS_DIR", t.TempDir())
+	api := newFakeAPI(t)
+
+	setupNode := func() (*Node, *runtimeHub, string) {
+		n, hub := runtimeNode(t)
+		assistantHub(hub)
+		n.dir = filepath.Join(n.home, ".persona")
+		allowWrite := proto.LarkRule{Method: "POST", Path: "/events", Action: "allow"}
+		n.mu.Lock()
+		n.larkCfg = proto.AssistantLark{Gates: []proto.CommandGate{proxiedGate(api.URL, allowWrite)}}
+		n.larkCfgAt = time.Now().Add(time.Hour)
+		n.larkCfg.CLI = &proto.LarkCLI{Bin: "/nonexistent/lark-cli"}
+		n.larkRisks = map[string]string{"\x00docs +create": "write"}
+		n.mu.Unlock()
+		hub.mu.Lock()
+		hub.resolve = func(proto.Interaction) proto.Resolution {
+			no := false
+			return proto.Resolution{Allow: &no}
+		}
+		hub.mu.Unlock()
+		cwd := identity.AssistantDir(n.home)
+		skillDir := filepath.Join(cwd, ".claude", "skills", "example", "scripts")
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "ex.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { n.gates().close() })
+		return n, hub, cwd
+	}
+
+	n, hub, cwd := setupNode()
+
+	remoteHost := dialRuntime(t, n, map[string]any{
+		"runtime": "pac", "name": "PAC", "launcher": "pac",
+		"caps": map[string]any{"start": true, "send": true, "interrupt": true, "assistant": true, "remote_agent": true},
+	})
+	localHost := dialRuntime(t, n, assistantRuntimeHello())
+
+	remoteHost.answer = func(method string, _ json.RawMessage) (any, error) {
+		if method == "session.start" {
+			return map[string]any{"session": map[string]any{"session_id": "pac-bypass-1", "cwd": cwd, "status": "idle"}}, nil
+		}
+		return map[string]any{"ok": true}, nil
+	}
+
+	if _, err := nodeCall(t, n, "assistant.send", map[string]any{
+		"launcher": "pac", "cwd": cwd, "text": "init remote", "permission_mode": proto.ModeBypass,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n.noteModes("pac-bypass-1", proto.ModeBypass, "")
+
+	nonAssistCwd := t.TempDir()
+	if err := remoteHost.peer.Notify("runtime.sessions", map[string]any{
+		"sessions": []map[string]any{{"session_id": "pac-nonassist-1", "cwd": nonAssistCwd, "status": "idle"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "remote non-assistant owned", func() bool {
+		_, _, ok := n.runtimes.rowOf("pac-nonassist-1")
+		return ok
+	})
+	n.rememberLarkAlways("pac-nonassist-1", "CLI /docs/+create")
+
+	env, release := n.assistantLarkEnv(cwd, "pac-bypass-1")
+	t.Cleanup(release)
+	proxyBase, ok := envOf(env, "EXAMPLE_BASE")
+	if !ok {
+		t.Fatalf("missing EXAMPLE_BASE in env: %v", env)
+	}
+
+	const bypassCmd = `lark-cli docs +create --title notes --markdown hi`
+	const ruleWriteCmd = `ex POST /events '{}'`
+
+	assertPosture := func(phase string, targetNode *Node, targetHub *runtimeHub, baseURL string) {
+		t.Helper()
+		if !targetNode.isRemoteRuntimeSession("pac-bypass-1") {
+			t.Fatalf("%s: expected pac-bypass-1 to retain remote posture", phase)
+		}
+		if decBypass, _, err := targetNode.larkCheck(context.Background(), "pac-bypass-1", cwd, bypassCmd,
+			proto.Interaction{SessionID: "pac-bypass-1", Cwd: cwd, ExpiresAt: time.Now().Add(time.Minute)}); err != nil || decBypass != "deny" {
+			t.Fatalf("%s: expected bypass write to require confirmation (denied by hub): dec=%q err=%v", phase, decBypass, err)
+		}
+		targetHub.mu.Lock()
+		before := len(targetHub.asked)
+		targetHub.mu.Unlock()
+		decRule, _, err := targetNode.larkCheck(context.Background(), "pac-bypass-1", cwd, ruleWriteCmd,
+			proto.Interaction{SessionID: "pac-bypass-1", Cwd: cwd, ExpiresAt: time.Now().Add(time.Minute)})
+		if err != nil || decRule != "deny" {
+			t.Fatalf("%s: expected rule-matched write to require confirmation (denied by hub): dec=%q err=%v", phase, decRule, err)
+		}
+		targetHub.mu.Lock()
+		after := len(targetHub.asked)
+		var lastAlways []string
+		if after > 0 {
+			lastAlways = append([]string(nil), targetHub.asked[after-1].AlwaysKeys...)
+		}
+		targetHub.mu.Unlock()
+		if after != before+1 || len(lastAlways) != 0 {
+			t.Fatalf("%s: expected fresh card with empty AlwaysKeys (%d -> %d), got AlwaysKeys=%v", phase, before, after, lastAlways)
+		}
+		beforeAPI := len(api.requests())
+		code, _ := send(t, http.MethodPost, baseURL+"/api/v1/events", `{"k":1}`)
+		if code != http.StatusForbidden {
+			t.Fatalf("%s: gateProxy allowed rule-matched write without card: HTTP %d", phase, code)
+		}
+		if len(api.requests()) != beforeAPI {
+			t.Fatalf("%s: gateProxy forwarded unconfirmed write to upstream API", phase)
+		}
+	}
+
+	// 1. Disconnect the remote runtime: belongs() now returns (nil, label, true).
+	_ = remoteHost.conn.Close()
+	waitFor(t, "remote runtime disconnected", func() bool {
+		conn, _, known := n.runtimes.belongs("pac-bypass-1")
+		return conn == nil && known
+	})
+	assertPosture("after disconnect", n, hub, proxyBase)
+	hub.mu.Lock()
+	cardsBeforeNonAssist := len(hub.asked)
+	hub.mu.Unlock()
+	if dec, _, err := n.larkCheck(context.Background(), "pac-nonassist-1", nonAssistCwd, bypassCmd,
+		proto.Interaction{SessionID: "pac-nonassist-1", Cwd: nonAssistCwd, ExpiresAt: time.Now().Add(time.Minute)}); err != nil || dec != "deny" {
+		t.Fatalf("after disconnect non-assistant write must still confirm: dec=%q err=%v", dec, err)
+	}
+	hub.mu.Lock()
+	if len(hub.asked) != cardsBeforeNonAssist+1 {
+		hub.mu.Unlock()
+		t.Fatalf("after disconnect expected confirmation card for pac-nonassist-1")
+	}
+	hub.mu.Unlock()
+
+	// 2. A non-remote runtime claims/lists the same session IDs: confirm-writes remains latched.
+	if err := localHost.peer.Notify("runtime.sessions", map[string]any{
+		"sessions": []map[string]any{
+			{"session_id": "pac-bypass-1", "cwd": cwd, "status": "idle"},
+			{"session_id": "pac-nonassist-1", "cwd": nonAssistCwd, "status": "idle"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "local runtime owns sessions", func() bool {
+		c1, _, _ := n.runtimes.belongs("pac-bypass-1")
+		c2, _, _ := n.runtimes.belongs("pac-nonassist-1")
+		return c1 != nil && c1.id() == "dsh" && !c1.remoteAgent() && c2 != nil && c2.id() == "dsh" && !c2.remoteAgent()
+	})
+	assertPosture("after non-remote takeover", n, hub, proxyBase)
+	hub.mu.Lock()
+	cardsBeforeLocalNonAssist := len(hub.asked)
+	hub.mu.Unlock()
+	if dec, _, err := n.larkCheck(context.Background(), "pac-nonassist-1", nonAssistCwd, bypassCmd,
+		proto.Interaction{SessionID: "pac-nonassist-1", Cwd: nonAssistCwd, ExpiresAt: time.Now().Add(time.Minute)}); err != nil || dec != "deny" {
+		t.Fatalf("after non-remote takeover non-assistant write must still confirm: dec=%q err=%v", dec, err)
+	}
+	hub.mu.Lock()
+	if len(hub.asked) != cardsBeforeLocalNonAssist+1 {
+		hub.mu.Unlock()
+		t.Fatalf("after non-remote takeover expected confirmation card for pac-nonassist-1")
+	}
+	hub.mu.Unlock()
+
+	// 3. stateFile.put preserves the RemoteAgent latch even if a subsequent write omits it.
+	n.state.put("pac-bypass-1", sessionState{Launcher: "pac", Cwd: cwd})
+	if st, ok := n.state.get("pac-bypass-1"); !ok || !st.RemoteAgent {
+		t.Fatalf("expected RemoteAgent latch to survive stateFile.put, got %+v (ok=%v)", st, ok)
+	}
+
+	// 4. Fresh Node (simulating restart) loading persisted state enforces confirm-writes before any runtime connects.
+	n2, hub2, cwd2 := setupNode()
+	n2.state.merge(map[string]sessionState{
+		"pac-bypass-1": {Launcher: "pac", Cwd: cwd2, RemoteAgent: true, AppMode: proto.ModeBypass},
+	})
+	n2.noteModes("pac-bypass-1", proto.ModeBypass, "")
+	env2, release2 := n2.assistantLarkEnv(cwd2, "pac-bypass-1")
+	t.Cleanup(release2)
+	proxyBase2, ok := envOf(env2, "EXAMPLE_BASE")
+	if !ok {
+		t.Fatalf("missing EXAMPLE_BASE on restarted node: %v", env2)
+	}
+	cwd = cwd2
+	assertPosture("after node restart", n2, hub2, proxyBase2)
 }

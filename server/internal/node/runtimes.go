@@ -207,14 +207,44 @@ func (h *runtimeConn) remoteAgent() bool {
 	return h.hello.Caps.Assistant && h.hello.Caps.RemoteAgent
 }
 
-// isRemoteRuntimeSession reports whether session belongs to a connected runtime declaring caps.assistant and
-// caps.remote_agent.
+// isRemoteRuntimeSession reports whether session carries the remote-assistant confirm-writes posture, using durable
+// session state, gateProxy marks, and registry records (including ambiguous ownership and startup state load) so
+// disconnects or ownership changes never clear the boundary.
 func (n *Node) isRemoteRuntimeSession(session string) bool {
-	if n == nil || n.runtimes == nil || session == "" {
+	if n == nil || session == "" {
 		return false
 	}
-	h, _, ok := n.runtimes.belongs(session)
-	return ok && h != nil && h.remoteAgent()
+	id := session
+	if parent, _, ok := splitRuntimeChild(session); ok {
+		id = parent
+	}
+	if n.gates().remoteSession(id) || (id != session && n.gates().remoteSession(session)) {
+		return true
+	}
+	if n.state != nil {
+		for _, candidate := range []string{id, session} {
+			if st, ok := n.state.get(candidate); ok {
+				if st.RemoteAgent {
+					return true
+				}
+				if st.Launcher != "" {
+					if h := n.assistantRuntime(st.Launcher); h != nil && h.remoteAgent() {
+						return true
+					}
+				}
+			}
+			if candidate == session {
+				break
+			}
+		}
+	}
+	if n.runtimes != nil && n.runtimes.isRemoteSession(session) {
+		return true
+	}
+	if n.state != nil && n.state.isLoading() && runtimeSessionID(id) {
+		return true
+	}
+	return false
 }
 
 // supervisionPolicy: the runtime runs assistant conversations and accepts supervision_instructions on its own policy
