@@ -47,6 +47,17 @@ func (n *Node) assistantLarkEnv(cwd, session string) (env []string, release func
 // conversation gets it from its thread): name tells the id once it is known, and the addresses opened so far stand for it
 // (nameAddr).
 func (n *Node) assistantLarkEnvNamed(cwd, session string) (env []string, release func(), name func(session string)) {
+	return n.assistantLarkEnvWithProxy(cwd, session, true)
+}
+
+// assistantRuntimeEnv is the same generated command and approved environment snapshot without process proxy addresses.
+// Runtime workers can be replaced independently of node RPCs, so Auth-held credentials and their BaseEnv stay in the node.
+func (n *Node) assistantRuntimeEnv(cwd string) []string {
+	env, _, _ := n.assistantLarkEnvWithProxy(cwd, "", false)
+	return env
+}
+
+func (n *Node) assistantLarkEnvWithProxy(cwd, session string, openProxy bool) (env []string, release func(), name func(session string)) {
 	var released []func()
 	release = func() {
 		for _, f := range released {
@@ -63,10 +74,10 @@ func (n *Node) assistantLarkEnvNamed(cwd, session string) (env []string, release
 	inSpace := identity.SpaceOf(cwd) != ""
 	remote := n.isRemoteRuntimeSession(session)
 	gp := n.gates()
-	if inSpace {
+	if inSpace && openProxy {
 		gp.markSpace(session) // larkCheck decides the conversation's space by this, not by the directory a hook runs in
 	}
-	if remote {
+	if remote && openProxy {
 		gp.markRemote(session)
 	}
 	var bases []string // the addresses opened for this process
@@ -102,8 +113,9 @@ func (n *Node) assistantLarkEnvNamed(cwd, session string) (env []string, release
 			if g.Relay && g.SocketEnv != "" {
 				held[g.SocketEnv] = true // the manager's machine's socket: the proxy relays there (#12904)
 			}
-			b, done, err := gp.openIn(g.Command, session, inSpace, remote) // the proxy holds space/remote writes to the phone
-			if err != nil {
+			if !openProxy {
+				held[g.BaseEnv] = true // no process-lifetime proxy lease is owned by a runtime RPC
+			} else if b, done, err := gp.openIn(g.Command, session, inSpace, remote); err != nil {
 				// Its credentials stay out all the same: without the base too, the command fails plainly.
 				n.logger.Printf("assistant: %s: gate proxy: %v", g.Command, err)
 				held[g.BaseEnv] = true
@@ -157,10 +169,10 @@ func (n *Node) assistantLarkEnvNamed(cwd, session string) (env []string, release
 		for _, b := range bases {
 			gp.nameAddr(b, id, isRemote)
 		}
-		if inSpace {
+		if inSpace && openProxy {
 			gp.markSpace(id)
 		}
-		if isRemote {
+		if isRemote && openProxy {
 			gp.markRemote(id)
 		}
 	}
