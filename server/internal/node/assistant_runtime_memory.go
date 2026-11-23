@@ -123,12 +123,15 @@ func (n *Node) assistantMemoryTool(_ context.Context, tool, session string, raw 
 		_, target, err := resolveMemoryTarget(dir, args.Name, false)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return proto.TextResult("Memory file not found: "+args.Name, true)
+				return proto.TextResult("", false)
 			}
 			return proto.TextResult("Cannot read memory file: "+err.Error(), true)
 		}
 		data, err := os.ReadFile(target)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return proto.TextResult("", false)
+			}
 			return proto.TextResult("Cannot read memory file: "+err.Error(), true)
 		}
 		if len(data) > memoryToolCap {
@@ -182,9 +185,14 @@ func resolveMemoryTarget(dir, name string, create bool) (string, string, error) 
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", "", err
 		}
+	} else if _, err := os.Lstat(dir); err != nil {
+		return "", "", err
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
+		if !create && errors.Is(err, os.ErrNotExist) {
+			return "", "", errors.New("memory directory symlink target does not exist")
+		}
 		return "", "", err
 	}
 	dinfo, err := os.Stat(resolvedDir)

@@ -123,9 +123,9 @@ func (n *Node) larkCheck(ctx context.Context, session, cwd, command string, ix p
 			}
 		}
 		// Only a rule-allowed call needs no query-bound grant. A confirmation-required GET needs one too, and a non-Auth
-		// script has no proxy backstop. Writes in a space always need confirmation. Refuse every unknown query in those cases
+		// script has no proxy backstop. Writes in a space or remote runtime always need confirmation. Refuse every unknown query in those cases
 		// rather than confirm different bytes.
-		needsConfirmation := decision != "allow" || (inSpace && !larkRead(c))
+		needsConfirmation := decision != "allow" || ((inSpace || remote) && !larkRead(c))
 		if c.queryUnknown && needsConfirmation {
 			return "deny", "查询要在执行时才能确定，无法绑定这次确认；请把查询直接写在路径或 --url-query 参数里。", nil
 		}
@@ -202,7 +202,7 @@ func (n *Node) larkCheck(ctx context.Context, session, cwd, command string, ix p
 			}
 			decision = "confirm" // unconfigured outbound/deletion still requires confirmation
 		}
-		if decision == "allow" && inSpace && !larkRead(c) {
+		if decision == "allow" && (inSpace || remote) && !larkRead(c) {
 			decision = "confirm"
 		}
 		switch decision {
@@ -210,7 +210,7 @@ func (n *Node) larkCheck(ctx context.Context, session, cwd, command string, ix p
 			return "deny", "这个操作按配置不允许（" + c.Method + " " + c.Path + "）。", nil
 		case "allow":
 		default:
-			if inSpace || n.isAssistantSession(session) || !n.larkAlways(session, larkPattern(c)) {
+			if inSpace || remote || n.isAssistantSession(session) || !n.larkAlways(session, larkPattern(c)) {
 				ask = append(ask, c)
 			} else {
 				covered = append(covered, c)
