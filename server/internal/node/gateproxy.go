@@ -368,12 +368,12 @@ func (p *gateProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	session, through := gk.session, proto.LarkLetThrough{}
 	switch larkDecision(cfg, c) {
 	case "allow":
-		// A call larkCheck confirmed and a rule allows too (a space conversation confirms what a rule allows) was
-		// let through by the card: it uses up its grant, as a confirmed call does. In a space conversation a write
-		// goes only so: a rule's allow is not the phone's yes.
+		// A call larkCheck confirmed and a rule allows too (a space or remote runtime conversation confirms what a rule allows)
+		// was let through by the card: it uses up its grant, as a confirmed call does. In a space or remote runtime conversation
+		// a write goes only so: a rule's allow is not the phone's yes.
 		if gr, ok := p.take(gk, c.Method, c.Path, c.Query, body, isJSON); ok {
 			session, through = firstNonEmpty(gr.session, session), gr.through
-		} else if gk.space && !larkRead(c) {
+		} else if (gk.space || n.isRemoteRuntimeSession(session)) && !larkRead(c) {
 			gateNeedsPhone(w, command, c)
 			return
 		} else if rule, ok := firstLark(g.Rules, c); ok {

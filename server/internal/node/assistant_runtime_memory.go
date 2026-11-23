@@ -57,7 +57,7 @@ func (n *Node) memoryTools() []proto.Tool {
 	return []proto.Tool{
 		{
 			Name:        toolMemoryRead,
-			Description: "Read a markdown note from the assistant's shared memory directory (for example MEMORY.md).",
+			Description: "Read a markdown note from the assistant's shared memory directory (for example MEMORY.md). Returns empty content when the memory directory or note does not exist yet.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Filename in the memory directory, ending in .md (no path separators)."}},"required":["name"],"additionalProperties":false}`),
 		},
 		{

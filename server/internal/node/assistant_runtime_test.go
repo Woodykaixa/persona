@@ -963,12 +963,15 @@ func TestRemoteAgentMemoryToolsAndPlanMode(t *testing.T) {
 		return res
 	}
 
-	// Reading before the memory directory exists returns an empty note rather than an error.
+	// Reading before the memory directory exists returns an empty note rather than an error, without creating the directory.
 	if _, err := os.Stat(n.memoryDir(cwd)); !os.IsNotExist(err) {
 		t.Fatalf("expected memory directory to not exist yet, stat err = %v", err)
 	}
-	if res := callMemory("memory_read", map[string]any{"name": "MEMORY.md"}); res.IsError || len(res.Content) == 0 || res.Content[0].Text != "" {
+	if res := callMemory("memory_read", map[string]any{"name": "MEMORY.md"}); res.IsError || len(res.Content) != 1 || res.Content[0].Text != "" {
 		t.Fatalf("expected empty note before memory dir exists, got: %+v", res)
+	}
+	if _, err := os.Stat(n.memoryDir(cwd)); !os.IsNotExist(err) {
+		t.Fatalf("expected memory_read not to create directory, stat err = %v", err)
 	}
 
 	if res := callMemory("memory_write", map[string]any{"name": "MEMORY.md", "content": "# Notes\nhello\n"}); res.IsError {
@@ -976,6 +979,9 @@ func TestRemoteAgentMemoryToolsAndPlanMode(t *testing.T) {
 	}
 	if res := callMemory("memory_read", map[string]any{"name": "MEMORY.md"}); res.IsError || len(res.Content) == 0 || res.Content[0].Text != "# Notes\nhello\n" {
 		t.Fatalf("memory_read mismatch: %+v", res)
+	}
+	if res := callMemory("memory_read", map[string]any{"name": "missing.md"}); res.IsError || len(res.Content) != 1 || res.Content[0].Text != "" {
+		t.Fatalf("expected empty note for absent file, got: %+v", res)
 	}
 
 	// Invalid names, unknown args, and oversized content must be rejected.
@@ -1143,28 +1149,81 @@ func TestRemoteAgentGateWriteRequiresConfirmEvenInBypass(t *testing.T) {
 		t.Fatalf("remote rule-allowed write must still confirm (denied by fake hub): dec=%q err=%v", decRuleWrite, err)
 	}
 
-	// Remote non-assistant sessions also ignore larkAlways and require fresh confirmation on writes.
+	// Approving a rule-matched write with Always=true must still confirm on subsequent calls and never populate AlwaysKeys.
+	hub.mu.Lock()
+	hub.resolve = func(proto.Interaction) proto.Resolution {
+		yes := true
+		return proto.Resolution{Allow: &yes, Always: true}
+	}
+	hub.mu.Unlock()
+	for attempt := 0; attempt < 2; attempt++ {
+		dec, _, err := n.larkCheck(context.Background(), "pac-bypass-1", cwd, `ex POST /events '{}'`,
+			proto.Interaction{SessionID: "pac-bypass-1", Cwd: cwd, ExpiresAt: time.Now().Add(time.Minute)})
+		if err != nil || dec != "allow" {
+			t.Fatalf("remote rule-matched write attempt %d: dec=%q err=%v", attempt+1, dec, err)
+		}
+	}
+	hub.mu.Lock()
+	if len(hub.asked) != 4 {
+		hub.mu.Unlock()
+		t.Fatalf("expected 4 cards before non-assistant checks, got %d", len(hub.asked))
+	}
+	for i := 1; i < 4; i++ {
+		if len(hub.asked[i].AlwaysKeys) != 0 {
+			hub.mu.Unlock()
+			t.Fatalf("expected AlwaysKeys empty on card %d, got %v", i, hub.asked[i].AlwaysKeys)
+		}
+	}
+	hub.mu.Unlock()
+
+	// Remote non-assistant sessions also ignore larkAlways and require fresh confirmation on writes,
+	// whereas a local non-assistant control session honors larkAlways.
 	nonAssistCwd := t.TempDir()
 	if err := remoteHost.peer.Notify("runtime.sessions", map[string]any{
 		"sessions": []map[string]any{{"session_id": "pac-nonassist-1", "cwd": nonAssistCwd, "status": "idle"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "remote non-assistant session owned", func() bool {
-		_, _, ok := n.runtimes.rowOf("pac-nonassist-1")
-		return ok
+	if err := localHost.peer.Notify("runtime.sessions", map[string]any{
+		"sessions": []map[string]any{{"session_id": "dsh-nonassist-1", "cwd": nonAssistCwd, "status": "idle"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "non-assistant runtime sessions owned", func() bool {
+		_, _, remoteOK := n.runtimes.rowOf("pac-nonassist-1")
+		_, _, localOK := n.runtimes.rowOf("dsh-nonassist-1")
+		return remoteOK && localOK
 	})
-	n.rememberLarkAlways("pac-nonassist-1", "CLI docs/create")
+	n.rememberLarkAlways("pac-nonassist-1", "CLI /docs/+create")
+	n.rememberLarkAlways("dsh-nonassist-1", "CLI /docs/+create")
+	decLocalAlways, _, err := n.larkCheck(context.Background(), "dsh-nonassist-1", nonAssistCwd, cmd,
+		proto.Interaction{SessionID: "dsh-nonassist-1", Cwd: nonAssistCwd, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil || decLocalAlways != "allow" {
+		t.Fatalf("local non-assistant write with larkAlways: dec=%q err=%v, want allow", decLocalAlways, err)
+	}
+	hub.mu.Lock()
+	afterLocalAlways := len(hub.asked)
+	hub.mu.Unlock()
+	if afterLocalAlways != 4 {
+		t.Fatalf("expected local non-assistant larkAlways to suppress card, got %d cards", afterLocalAlways)
+	}
 	decAlways, _, err := n.larkCheck(context.Background(), "pac-nonassist-1", nonAssistCwd, cmd,
 		proto.Interaction{SessionID: "pac-nonassist-1", Cwd: nonAssistCwd, ExpiresAt: time.Now().Add(time.Minute)})
-	if err != nil || decAlways != "deny" {
-		t.Fatalf("remote non-assistant write must ignore larkAlways and confirm (denied by fake hub): dec=%q err=%v", decAlways, err)
+	if err != nil || decAlways != "allow" {
+		t.Fatalf("remote non-assistant write must still confirm (allowed by hub): dec=%q err=%v", decAlways, err)
 	}
 	hub.mu.Lock()
 	totalCards := len(hub.asked)
+	var lastAlways []string
+	if totalCards > 0 {
+		lastAlways = append([]string(nil), hub.asked[totalCards-1].AlwaysKeys...)
+	}
 	hub.mu.Unlock()
-	if totalCards != 3 {
-		t.Fatalf("expected 3 confirmation cards total (bypass + rule-allowed write + larkAlways write), got %d", totalCards)
+	if totalCards != 5 {
+		t.Fatalf("expected 5 confirmation cards total, got %d", totalCards)
+	}
+	if len(lastAlways) != 0 {
+		t.Fatalf("expected AlwaysKeys empty on remote non-assistant confirm card, got %v", lastAlways)
 	}
 }
 
