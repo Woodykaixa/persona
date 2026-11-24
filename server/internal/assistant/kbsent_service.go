@@ -3,9 +3,9 @@ package assistant
 import (
 	"context"
 
-	"github.com/nwverse/persona/server/internal/assistant/kbsent"
 	"github.com/nwverse/persona/server/internal/assistantwire"
 	"github.com/nwverse/persona/server/internal/kb"
+	"github.com/nwverse/persona/server/internal/modules/knowledge-ui/kbsent"
 )
 
 // kbDaySent is the knowledge base day p names, with the lines the user sent from Persona marked (kbsent).

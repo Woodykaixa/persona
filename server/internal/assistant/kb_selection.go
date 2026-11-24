@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/nwverse/persona/server/internal/assistant/kbhistory"
+	"github.com/nwverse/persona/server/internal/modules/knowledge-ui/kbhistory"
 	"io"
 	"net/http"
 	"sort"

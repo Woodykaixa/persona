@@ -3,7 +3,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
-	"github.com/nwverse/persona/server/internal/assistant/kbhistory"
+	"github.com/nwverse/persona/server/internal/modules/knowledge-ui/kbhistory"
 	"net/http/httptest"
 	"slices"
 	"strings"
