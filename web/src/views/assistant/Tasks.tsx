@@ -389,9 +389,8 @@ function planDispatchReason(dispatch: PlanTask["dispatch"]): string {
   for (const [k, v] of Object.entries(rawArgs)) {
     if (typeof v === "string" || typeof v === "number") args[k] = v;
   }
-  const candidate =
-    args.candidate ??
-    (typeof dispatch.candidate === "number" ? (dispatch.candidate >= 1 ? dispatch.candidate : 1) : 1);
+  // dispatch.candidate is the 0-based index into the tier's candidates (the same index as /candidates); people count from 1
+  const candidate = typeof dispatch.candidate === "number" && dispatch.candidate >= 0 ? dispatch.candidate + 1 : 1;
   const tier = args.tier ?? dispatch.tier ?? "";
   const base: Record<string, string | number> = { ...args, tier, candidate };
   const detail = args.detail ?? args.cause ?? args.provider ?? "";
