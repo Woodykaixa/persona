@@ -73,7 +73,7 @@ final class ConversationVoiceState: ConversationVoice {
     func threadTail(key: SessionKey, held: Bool) -> AnyView { AnyView(VoiceThreadTail(key: key, held: held)) }
 
     func tailFollower(key: SessionKey, follow: @escaping () -> Void) -> AnyView {
-        AnyView(Color.clear.frame(width: 0, height: 0).accessibilityHidden(true).modifier(VoiceTailFollow(key: key, follow: follow)))
+        AnyView(Color.clear.allowsHitTesting(false).accessibilityHidden(true).modifier(VoiceTailFollow(key: key, follow: follow)))
     }
 
     func composerSupport(key: SessionKey, active: Bool, offered: @escaping () -> Bool, start: @escaping () -> Void) -> AnyView {
@@ -107,7 +107,7 @@ final class ConversationVoiceState: ConversationVoice {
     }
 }
 
-/// `ComposerVoice` with the page's note kept in the module's state: drawn behind the composer, it draws nothing.
+/// `ComposerVoice` with the page's note kept in the module's state: drawn clear behind the composer, it takes no touch.
 private struct VoiceComposerSupport: View {
     let key: SessionKey
     let active: Bool
@@ -117,7 +117,7 @@ private struct VoiceComposerSupport: View {
     var body: some View {
         let state = ConversationVoiceState.shared
         Color.clear
-            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
             .accessibilityHidden(true)
             .modifier(ComposerVoice(key: key, note: Binding(get: { state.notes[key] }, set: { state.notes[key] = $0 }),
                                     active: active, offered: offered, start: start))
