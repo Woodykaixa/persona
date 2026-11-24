@@ -145,6 +145,21 @@ test('a reused lower step index keeps earlier steps when the export goes on past
   const rewound = logs(t)
   writeFileSync(join(rewound.directory, 'transcript_full.jsonl'), old + [1, 2, 3, 4].map((i) => step(i, `new ${i}`, '2026-01-02')).join(''))
   assert.deepEqual(contents(readTranscript(rewound.brain, true).steps), ['old 0', 'new 1', 'new 2', 'new 3', 'new 4'], 'a rewind still trims')
+
+  // A rewind whose parallel results come out of order (#11086) jumps past the old steps before it exports the skipped index.
+  // That late index proves the run re-covered them, so the restored old steps go again, in a full and an incremental parse.
+  const parallel = logs(t)
+  const parallelFile = join(parallel.directory, 'transcript_full.jsonl')
+  writeFileSync(parallelFile, '')
+  for (const [i, text] of [[0, 'old 0'], [1, 'old 1'], [2, 'old 2'], [3, 'old 3'], [4, 'old 4'], [2, 'new 2'], [3, 'new 3'], [5, 'new 5'], [4, 'new 4'], [6, 'new 6']]) {
+    appendFileSync(parallelFile, step(i, text, '2026-01-02'))
+    readTranscript(parallel.brain, true)
+  }
+  const rewoundOrder = ['old 0', 'old 1', 'new 2', 'new 3', 'new 4', 'new 5', 'new 6']
+  assert.deepEqual(contents(readTranscript(parallel.brain, true).steps), rewoundOrder, 'out-of-order results still rewind')
+  const parallelWhole = logs(t)
+  writeFileSync(join(parallelWhole.directory, 'transcript_full.jsonl'), readFileSync(parallelFile))
+  assert.deepEqual(contents(readTranscript(parallelWhole.brain, true).steps), rewoundOrder)
 })
 
 test('parsed transcript cache retains a full inventory of 80 sessions', async (t) => {
