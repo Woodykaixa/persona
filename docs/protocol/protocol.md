@@ -3581,7 +3581,7 @@ and the hub also had to wait for the small model to come up with a tab name firs
 - Terminal Codex launchers (`agent: "codex"`) don't use `async`: Codex only creates the thread and fixes the session id when it gets the first message, so the App puts the first message in `prompt` and creates synchronously,
   and the node waits until that thread appears before returning (at most 60 seconds), returning its session. With no `prompt`, a node whose Codex launchers carry `prompt_optional: true` (in `launchers.list` and the hub's launcher lists)
   opens Codex waiting for its first message and returns a row with `awaiting_first_message: true`, `status: idle` and an id of its own; the first message, sent to that row or typed in its terminal, makes it the thread,
-  in the same pane (`docs/integrations/codex.md` "Starting without a first message"). Rejection `code`s: `codex_needs_prompt` (`async` given, or no `prompt` on an older node),
+  in the same pane (`docs/integrations/codex.md` "Starting without a first message"). Rejection `code`s: `codex_needs_prompt` (an older node rejects `async`, or requires a first `prompt` because it does not advertise `prompt_optional`),
   `codex_launcher` (a shell function that runs Codex), `codex_resume` (a Codex session that cannot be resumed from the phone: something has it open, or there is no record of it; see `docs/integrations/codex.md` "Resuming from the phone"). See `docs/integrations/codex.md` ("Creating from the phone").
 
 ### Answering a start's question
