@@ -368,7 +368,12 @@ func run(ctx context.Context, build update.Build, o runOptions) error {
 		PromptLanguage:         func() string { return answerLanguage(svc.hello(context.Background()).Locale) },
 		// The extensions' part of a node's connection and its events (internal/extmgr).
 		Own:         func(ctx context.Context, machine string) map[string]json.RawMessage { return ext.Own(ctx, machine) },
-		OnConnected: func(machine string) { ext.NodeConnected(machine) },
+		OnConnected: func(machine string) {
+			ext.NodeConnected(machine)
+			if svc != nil {
+				svc.NodeConnected(ctx, machine)
+			}
+		},
 		OnEvent:     func(machine, event string, params json.RawMessage) bool { return ext.NodeEvent(machine, event, params) },
 		// The messages held for a machine's Agents changed (devices held.go): its rows again, nothing else of a list.
 		HeldChanged: func(machine string) { svc.publishSessions(machine) },
