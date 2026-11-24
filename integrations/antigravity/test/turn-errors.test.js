@@ -494,6 +494,25 @@ test('a failed native read shows a turn error and is retried at most twice', asy
   assert.equal(calls().filter((call) => call.method === 'GetCascadeTrajectorySteps').length, 3)
 })
 
+for (const recovered of [true, false]) {
+  test(`a native read that fails and then ${recovered ? 'finds the error replaces' : 'finds no error drops'} the failure under a new history`, async (t) => {
+    const { row, items, nativeFile } = await fixture(t, { stepsUnavailable: true, nativeErrorRetryMs: 0,
+      nativeError: recovered ? error : { type: 'CORTEX_STEP_TYPE_SYSTEM_MESSAGE' } })
+    const failure = 'Persona could not read this turn\'s result from Antigravity.'
+    const failed = await items()
+    assert.equal(failed.items.at(-1).text, `API Error: ${failure}`)
+    await until('failure published', () => row()?.turn_error === failure)
+    const snapshot = JSON.parse(readFileSync(nativeFile, 'utf8'))
+    delete snapshot.stepsUnavailable
+    writeFileSync(nativeFile, JSON.stringify(snapshot))
+    const page = await items()
+    assert.notEqual(page.history, failed.history)
+    assert.deepEqual(page.items.map((item) => [item.seq, item.text]),
+      recovered ? [[1, input.content], [2, `API Error: ${MESSAGE}`]] : [[1, input.content]])
+    await until('row updated', () => row()?.turn_error === (recovered ? MESSAGE : undefined))
+  })
+}
+
 test('rewinding a failed turn removes its recovered error', async (t) => {
   const { node, row, items } = await fixture(t)
   await items()

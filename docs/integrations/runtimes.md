@@ -595,7 +595,8 @@ loads the conversation (`session/resume`) and reads once more; a step still abse
 summary ahead of a rewind) and shows nothing. A step that came back is not read again on the same exported branch;
 inserting an error before the export's last step adds `:native-errors:<indices>` to the history token so clients
 reload. If the read or the load fails, the turn shows `Persona could not read this turn's result from Antigravity.` as
-its error, and the read is retried at most twice, 30 seconds apart, while the summary and export stay the same. Discovery opens the
+its error and the history token gains `:native-read-failed`, so a later read that replaces or drops that error
+reloads clients and refreshes the row. The read is retried at most twice, 30 seconds apart, while the summary and export stay the same. Discovery opens the
 native service through read-only session listing. An omitted error uses the shared assistant-text `API Error:`
 representation for the existing error card, and a terminal one populates the session's `turn_error`
 fields, including a subscription reset timestamp supplied in native quota metadata. When Antigravity gives only its
