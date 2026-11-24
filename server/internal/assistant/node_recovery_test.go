@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nwverse/persona/server/internal/db"
 	"github.com/nwverse/persona/server/internal/prompts"
 	"github.com/nwverse/persona/server/internal/proto"
 )
@@ -149,7 +150,7 @@ func TestNodeRecoveryDisconnectReconnect(t *testing.T) {
 	reconnectedAt := shortBack.Add(20 * time.Minute)
 	devs.setMachine("worker", "Worker Node", "worker-host", bootBefore, reconnectedAt)
 	res := s.nodeConnectedAt(ctx, "worker", reconnectedAt)
-	if !res.Triggered || res.Rebooted || res.Checked != 4 || res.Woken != 2 || res.Signalled != 2 {
+	if !res.Triggered || res.Rebooted || res.Checked != 4 || res.Frozen != 1 || res.Woken != 2 || res.Signalled != 2 {
 		t.Fatalf("unexpected disconnect/reconnect sweep result: %+v", res)
 	}
 
@@ -262,7 +263,7 @@ func TestNodeRecoveryReboot(t *testing.T) {
 		return map[string]any{"ok": true}, nil
 	})
 
-	// Only 2 minutes offline (< 10m), but BootTime is after lastOnline -> reboot detected!
+	// Only 2 minutes offline (< 10m), but BootTime is after lastOnline -> reboot detected.
 	reconnectedAt := base.Add(2 * time.Minute)
 	newBoot := base.Add(1 * time.Minute).Unix()
 	devs.setMachine("builder", "Builder Box", "builder-host", newBoot, reconnectedAt)
@@ -295,7 +296,6 @@ func TestNodeRecoveryReboot(t *testing.T) {
 		t.Fatalf("successfully woken waiter should not be flagged as unresumable in digest:\n%s", msg)
 	}
 
-	// Verify the supervision message holds pushes (never pushes directly to the owner).
 	f.mu.Lock()
 	var convSends []map[string]any
 	for _, a := range f.sends {
@@ -306,5 +306,246 @@ func TestNodeRecoveryReboot(t *testing.T) {
 	f.mu.Unlock()
 	if len(convSends) != 1 || convSends[0][holdPushesParam] != true {
 		t.Fatalf("supervision digest must hold owner pushes, got sends=%+v", convSends)
+	}
+}
+
+// Scenario 3: task moved to another node during the outage.
+// When the old node returns: freeze old Agent first, detect takeover by the new
+// node, do NOT resume/redo work, release the old Agent, withdraw its leftover
+// background waits, and record "taken over by X" in supervision without pushing.
+func TestNodeRecoveryMovedToAnotherNode(t *testing.T) {
+	ctx := context.Background()
+	s, f := newQuietService(t)
+	s.superviseTimes = superviseTimings{gather: time.Millisecond, every: time.Millisecond, urgent: time.Millisecond}
+	devs := newRecoveryTestDevices()
+	s.devs = devs
+
+	base := time.Date(2026, 11, 24, 14, 0, 0, 0, time.UTC)
+	bootBefore := base.Add(-3 * time.Hour).Unix()
+	devs.setMachine("old-node", "Old Node", "old-host", bootBefore, base.Add(-time.Hour))
+	devs.setMachine("new-node", "New Node", "new-host", bootBefore, base.Add(-time.Hour))
+
+	s.noteNodeOnline("old-node", base)
+	s.noteNodeOffline("old-node", base)
+
+	// Task originally started on old-node, then during the outage was moved to new-node.
+	task := createSupervisedRecoveryTodo(t, s, "Ship feature branch", "old-node", "s-old")
+	if err := s.linkTodoAgent(ctx, task.ID, "new-node", "s-new", "Ship feature branch", "/code/app", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	// Ensure LinkedAt clearly reflects old-node before outage and new-node during outage.
+	s.todos.mu.Lock()
+	for i := range s.todos.todos[task.ID].Agents {
+		if s.todos.todos[task.ID].Agents[i].MachineID == "old-node" {
+			s.todos.todos[task.ID].Agents[i].LinkedAt = base.Add(-30 * time.Minute)
+		} else {
+			s.todos.todos[task.ID].Agents[i].LinkedAt = base.Add(5 * time.Minute)
+		}
+	}
+	s.todos.mu.Unlock()
+
+	// Seed a leftover scheduled background wait for the old Agent.
+	wakeAt := base.Add(25 * time.Minute)
+	s.putWork(ctx, db.SessionWork{
+		MachineID: "old-node",
+		SessionID: "s-old",
+		WakeAt:    &wakeAt,
+		Work:      proto.WorkState{Phase: proto.WorkBlocked, On: proto.WaitExternal, WakeAt: &wakeAt},
+	})
+
+	f.setSessions("old-node", proto.Session{
+		SessionID: "s-old", MachineID: "old-node", Status: proto.StatusWorking, State: proto.StateWorking,
+		PaneID: "w1:p1", StartedByPersona: true, UpdatedAt: base.Add(-5 * time.Minute),
+		Branch: "feat/demo", LastText: "starting tests",
+	})
+	f.setSessions("new-node", proto.Session{
+		SessionID: "s-new", MachineID: "new-node", Status: proto.StatusWorking, State: proto.StateWorking,
+		PaneID: "w2:p1", StartedByPersona: true, UpdatedAt: base.Add(12 * time.Minute),
+		Branch: "feat/demo", LastText: "pushed fix and running CI",
+	})
+
+	var (
+		mu          sync.Mutex
+		interrupted []string
+		stopped     []string
+		woken       []string
+	)
+	f.answerNode("session.interrupt", func(machine string, raw json.RawMessage) (any, error) {
+		var p struct{ SessionID string `json:"session_id"` }
+		_ = json.Unmarshal(raw, &p)
+		mu.Lock()
+		interrupted = append(interrupted, machine+"/"+p.SessionID)
+		mu.Unlock()
+		return map[string]any{"ok": true, "settled": true}, nil
+	})
+	f.answerNode(deviceSessionStop, func(machine string, raw json.RawMessage) (any, error) {
+		var p struct{ SessionID string `json:"session_id"` }
+		_ = json.Unmarshal(raw, &p)
+		mu.Lock()
+		stopped = append(stopped, machine+"/"+p.SessionID)
+		mu.Unlock()
+		return map[string]any{"ok": true}, nil
+	})
+	f.answerNode(DeviceSessionSend, func(machine string, raw json.RawMessage) (any, error) {
+		var p struct{ SessionID string `json:"session_id"` }
+		_ = json.Unmarshal(raw, &p)
+		mu.Lock()
+		woken = append(woken, machine+"/"+p.SessionID)
+		mu.Unlock()
+		return map[string]any{"ok": true}, nil
+	})
+
+	reconnectedAt := base.Add(20 * time.Minute)
+	devs.setMachine("old-node", "Old Node", "old-host", bootBefore, reconnectedAt)
+	res := s.nodeConnectedAt(ctx, "old-node", reconnectedAt)
+	if !res.Triggered || res.Frozen != 1 || res.Released != 1 || res.Woken != 0 || res.Conflicts != 0 || res.Signalled != 1 {
+		t.Fatalf("unexpected moved-task recovery result: %+v", res)
+	}
+
+	mu.Lock()
+	gotInt, gotStop, gotWake := append([]string(nil), interrupted...), append([]string(nil), stopped...), append([]string(nil), woken...)
+	mu.Unlock()
+	if len(gotInt) != 1 || gotInt[0] != "old-node/s-old" {
+		t.Fatalf("expected old Agent to be frozen first via session.interrupt, got %v", gotInt)
+	}
+	if len(gotStop) != 1 || gotStop[0] != "old-node/s-old" {
+		t.Fatalf("expected covered old Agent to be stopped, got %v", gotStop)
+	}
+	if len(gotWake) != 0 {
+		t.Fatalf("covered old Agent must not be woken to redo work, got %v", gotWake)
+	}
+
+	// Old Agent must be released while new Agent remains active.
+	updated := todoNow(s, task.ID)
+	var oldReleased, newActive bool
+	for _, a := range updated.Agents {
+		if a.MachineID == "old-node" && a.SessionID == "s-old" && a.ReleasedAt != nil {
+			oldReleased = true
+		}
+		if a.MachineID == "new-node" && a.SessionID == "s-new" && a.ReleasedAt == nil {
+			newActive = true
+		}
+	}
+	if !oldReleased || !newActive {
+		t.Fatalf("expected old Agent released and new Agent active, got %+v", updated.Agents)
+	}
+
+	// Leftover background wait for old-node/s-old must be retired.
+	s.work.mu.Lock()
+	we := s.work.entries[[2]string{"old-node", "s-old"}]
+	s.work.mu.Unlock()
+	if we == nil || we.WakeAt != nil || we.Work.RetiredAt == nil {
+		t.Fatalf("expected leftover work wait to be retired, got %+v", we)
+	}
+
+	// Supervision digest records "已由 new-node/s-new 接手" silently.
+	s.sendDigest(ctx)
+	notices := f.notices()
+	if len(notices) != 1 || !strings.Contains(notices[0], "已由 new-node/s-new 接手") {
+		t.Fatalf("expected takeover record in supervision digest, got %v", notices)
+	}
+}
+
+// Scenario 4: both sides pushed commits during the outage.
+// When the old node returns: freeze old Agent first, detect diverging progress,
+// do NOT auto-pick a side (neither wake nor release), and signal the supervisor.
+func TestNodeRecoveryBothSidesPushedConflict(t *testing.T) {
+	ctx := context.Background()
+	s, f := newQuietService(t)
+	s.superviseTimes = superviseTimings{gather: time.Millisecond, every: time.Millisecond, urgent: time.Millisecond}
+	devs := newRecoveryTestDevices()
+	s.devs = devs
+
+	base := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+	bootBefore := base.Add(-3 * time.Hour).Unix()
+	devs.setMachine("node-a", "Node A", "host-a", bootBefore, base.Add(-time.Hour))
+	devs.setMachine("node-b", "Node B", "host-b", bootBefore, base.Add(-time.Hour))
+
+	s.noteNodeOnline("node-a", base)
+	s.noteNodeOffline("node-a", base)
+
+	task := createSupervisedRecoveryTodo(t, s, "Refactor scheduler", "node-a", "s-a")
+	if err := s.linkTodoAgent(ctx, task.ID, "node-b", "s-b", "Refactor scheduler", "/code/app", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	s.todos.mu.Lock()
+	for i := range s.todos.todos[task.ID].Agents {
+		if s.todos.todos[task.ID].Agents[i].MachineID == "node-a" {
+			s.todos.todos[task.ID].Agents[i].LinkedAt = base.Add(-20 * time.Minute)
+		} else {
+			s.todos.todos[task.ID].Agents[i].LinkedAt = base.Add(6 * time.Minute)
+		}
+	}
+	s.todos.mu.Unlock()
+
+	// Both sides pushed commits on the same branch after outageStart.
+	f.setSessions("node-a", proto.Session{
+		SessionID: "s-a", MachineID: "node-a", Status: proto.StatusWorking, State: proto.StateWorking,
+		PaneID: "w1:p1", StartedByPersona: true, UpdatedAt: base.Add(10 * time.Minute),
+		Branch: "feat/scheduler", LastText: "pushed commit abc111 to feat/scheduler",
+	})
+	f.setSessions("node-b", proto.Session{
+		SessionID: "s-b", MachineID: "node-b", Status: proto.StatusIdle, State: proto.StateIdle,
+		PaneID: "w2:p1", StartedByPersona: true, UpdatedAt: base.Add(14 * time.Minute),
+		Branch: "feat/scheduler", LastText: "pushed commit def222 to feat/scheduler",
+	})
+
+	var (
+		mu          sync.Mutex
+		interrupted []string
+		woken       []string
+	)
+	f.answerNode("session.interrupt", func(machine string, raw json.RawMessage) (any, error) {
+		var p struct{ SessionID string `json:"session_id"` }
+		_ = json.Unmarshal(raw, &p)
+		mu.Lock()
+		interrupted = append(interrupted, machine+"/"+p.SessionID)
+		mu.Unlock()
+		return map[string]any{"ok": true, "settled": true}, nil
+	})
+	f.answerNode(DeviceSessionSend, func(machine string, raw json.RawMessage) (any, error) {
+		var p struct{ SessionID string `json:"session_id"` }
+		_ = json.Unmarshal(raw, &p)
+		mu.Lock()
+		woken = append(woken, machine+"/"+p.SessionID)
+		mu.Unlock()
+		return map[string]any{"ok": true}, nil
+	})
+
+	reconnectedAt := base.Add(20 * time.Minute)
+	devs.setMachine("node-a", "Node A", "host-a", bootBefore, reconnectedAt)
+	res := s.nodeConnectedAt(ctx, "node-a", reconnectedAt)
+	if !res.Triggered || res.Frozen != 1 || res.Conflicts != 1 || res.Released != 0 || res.Woken != 0 || res.Signalled != 1 {
+		t.Fatalf("unexpected conflict recovery result: %+v", res)
+	}
+
+	mu.Lock()
+	gotInt, gotWake := append([]string(nil), interrupted...), append([]string(nil), woken...)
+	mu.Unlock()
+	if len(gotInt) != 1 || gotInt[0] != "node-a/s-a" {
+		t.Fatalf("expected returning Agent to be frozen first, got %v", gotInt)
+	}
+	if len(gotWake) != 0 {
+		t.Fatalf("conflicting side must not be auto-woken, got %v", gotWake)
+	}
+
+	// Neither side should be released automatically.
+	updated := todoNow(s, task.ID)
+	for _, a := range updated.Agents {
+		if a.ReleasedAt != nil {
+			t.Fatalf("conflict must not auto-release either Agent: %+v", updated.Agents)
+		}
+	}
+
+	// Conflict is handed to the supervisor via supervision digest (no owner push).
+	s.sendDigest(ctx)
+	notices := f.notices()
+	if len(notices) != 1 {
+		t.Fatalf("expected 1 conflict supervision digest, got %d: %v", len(notices), notices)
+	}
+	for _, want := range []string{"signal=recovered", "双边进展冲突", "feat/scheduler", "node-a/s-a", "node-b/s-b"} {
+		if !strings.Contains(notices[0], want) {
+			t.Fatalf("conflict digest missing %q:\n%s", want, notices[0])
+		}
 	}
 }

@@ -1503,6 +1503,29 @@ func (s *Service) cancelMachineInteractions(machineID string) {
 	}
 }
 
+// cancelSessionInteractions withdraws leftover approval gates and pending cards
+// for one superseded session on a returning node (node_recovery.go, #14781).
+func (s *Service) cancelSessionInteractions(machineID, sessionID string) {
+	s.fleet.mu.Lock()
+	var ids []string
+	for id, p := range s.fleet.interactions {
+		if p.ix.MachineID == machineID && p.ix.SessionID == sessionID {
+			ids = append(ids, id)
+		}
+	}
+	s.fleet.mu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	s.feishuDetach(ids)
+	for _, id := range ids {
+		if s.endPreparedByID(id, "cancelled", "The superseded Agent was released during node recovery; nothing changed.") {
+			continue
+		}
+		s.finishInteraction(id)
+	}
+}
+
 // restoreInteractions takes back, as the manager starts, the resumable cards the last one left pending: their hooks
 // reconnect through the next node and claim them again (waitInteraction), without a second push; the others it left
 // are over (cancelled in the history), and the hub is told so: a hub that took over from the one they were shown by
