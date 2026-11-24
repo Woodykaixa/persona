@@ -15,6 +15,7 @@ import (
 func TestGoldenMCPDiscoveryLanguages(t *testing.T) {
 	needsLarkLayer(t)
 	needsKnowledgeUIModule(t) // the golden lists the kb_history_* tools
+	needsHealthModule(t)      // the goldens list health_intake, the Health module's tool
 	ft := newFleetTest(t)
 	ft.f.hello.Assistant.MachineID = "mac"
 	ctx := i18n.With(context.Background(), i18n.En) // request locale must not replace the owner's

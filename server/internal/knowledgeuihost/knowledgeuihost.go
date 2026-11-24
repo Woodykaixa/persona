@@ -17,6 +17,7 @@ import (
 	"github.com/nwverse/persona/server/internal/connectorwire"
 	"github.com/nwverse/persona/server/internal/i18n"
 	"github.com/nwverse/persona/server/internal/kb"
+	"github.com/nwverse/persona/server/internal/moduleswitch"
 )
 
 // ModuleID is the module's id (its module.json): the kernel's switch turns it off by this name.
@@ -77,23 +78,20 @@ type Host interface {
 	DayStart(now time.Time) time.Time
 }
 
-var provided func(Host) Layer
+var port = moduleswitch.NewPort[func(Host) Layer]("knowledgeuihost")
 
-// Provide provides the module: new makes its layer for one manager's host (init only).
-func Provide(new func(Host) Layer) {
-	if provided != nil {
-		panic("knowledgeuihost: the knowledge-ui module provided twice")
-	}
-	provided = new
-}
+// Provide provides the module under its id: new makes its layer for one manager's host (init only; twice panics).
+func Provide(module string, new func(Host) Layer) { port.Provide(module, new) }
 
-// InBuild says whether the module is in this build.
-func InBuild() bool { return provided != nil }
+// InBuild says whether the module is in this build and s has it on.
+func InBuild(s moduleswitch.Set) bool { return port.On(s) }
 
-// New is the module's layer for h; false when the module is not in this build.
-func New(h Host) (Layer, bool) {
-	if provided == nil {
+// New is the module's layer for h; false when the module is not in this build or s switched it off (the `modules`
+// setting the manager started with), so it is absent exactly as one built out.
+func New(s moduleswitch.Set, h Host) (Layer, bool) {
+	newLayer, ok := port.Get(s)
+	if !ok {
 		return nil, false
 	}
-	return provided(h), true
+	return newLayer(h), true
 }

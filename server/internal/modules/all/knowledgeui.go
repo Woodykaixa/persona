@@ -10,5 +10,5 @@ import (
 // The knowledge pages' module: its layer, which the assistant reaches through internal/knowledgeuihost.
 func init() {
 	modules = append(modules, knowledgeui.Module{})
-	knowledgeuihost.Provide(func(h knowledgeuihost.Host) knowledgeuihost.Layer { return knowledgeui.New(h) })
+	knowledgeuihost.Provide(knowledgeui.Module{}.Info().ID, func(h knowledgeuihost.Host) knowledgeuihost.Layer { return knowledgeui.New(h) })
 }

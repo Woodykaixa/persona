@@ -12,6 +12,7 @@ import (
 	"github.com/nwverse/persona/server/internal/i18n"
 	"github.com/nwverse/persona/server/internal/kb"
 	"github.com/nwverse/persona/server/internal/knowledgeuihost"
+	"github.com/nwverse/persona/server/internal/moduleswitch"
 )
 
 // The knowledge pages' module (internal/modules/knowledge-ui, docs/architecture/core-and-modules.md "Knowledge UI"):
@@ -26,12 +27,9 @@ import (
 var historyToolNames = []string{"kb_history_plan", "kb_history_status", "kb_history_stop", "kb_history_resume"}
 
 // loadKnowledgeUI makes the module's layer when the build has the module and the modules row does not switch it off
-// (off, Options.ModulesOff).
-func (s *Service) loadKnowledgeUI(off []string) {
-	if slices.Contains(off, knowledgeuihost.ModuleID) {
-		return
-	}
-	if ui, ok := knowledgeuihost.New(knowledgeUIHost{s}); ok {
+// (the port asks the switch, moduleswitch, as every provider seam does).
+func (s *Service) loadKnowledgeUI() {
+	if ui, ok := knowledgeuihost.New(s.moduleSwitch, knowledgeUIHost{s}); ok {
 		s.ui = ui
 	}
 }
@@ -39,7 +37,7 @@ func (s *Service) loadKnowledgeUI(off []string) {
 // withKnowledgeUI is names without the module's tools when svc has no knowledge-ui layer (none yet: when the build
 // has no such module), in their order.
 func withKnowledgeUI(names []string, svc *Service) []string {
-	on := knowledgeuihost.InBuild()
+	on := knowledgeuihost.InBuild(moduleswitch.Set{}) // no service yet: as the build has it
 	if svc != nil {
 		on = svc.ui != nil
 	}

@@ -15,13 +15,14 @@ import (
 	"github.com/nwverse/persona/server/internal/connectorwire"
 	"github.com/nwverse/persona/server/internal/kb"
 	"github.com/nwverse/persona/server/internal/knowledgeuihost"
+	"github.com/nwverse/persona/server/internal/moduleswitch"
 )
 
 // needsKnowledgeUIModule skips a test of the knowledge pages' module's behaviour when the build has none
 // (persona_without_knowledge_ui, persona_core_only).
 func needsKnowledgeUIModule(t testing.TB) {
 	t.Helper()
-	if !knowledgeuihost.InBuild() {
+	if !knowledgeuihost.InBuild(moduleswitch.Set{}) {
 		t.Skip("the knowledge-ui module is not in this build (persona_without_knowledge_ui, persona_core_only)")
 	}
 }
@@ -151,7 +152,7 @@ func TestKnowledgeUIFollowsItsModule(t *testing.T) {
 		name string
 		off  []string
 		on   bool
-	}{{"build", nil, knowledgeuihost.InBuild()}, {"switched off", []string{knowledgeuihost.ModuleID}, false}} {
+	}{{"build", nil, knowledgeuihost.InBuild(moduleswitch.Set{})}, {"switched off", []string{knowledgeuihost.ModuleID}, false}} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeHub()
 			f.hello.KB = &KBSettings{History: &assistantwire.KBHistory{Enabled: true}}
