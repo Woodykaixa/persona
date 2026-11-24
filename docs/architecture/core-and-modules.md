@@ -130,7 +130,7 @@ Because a missing flag means off, every flag a client gates on has to be announc
 - **Every built-in module declares `feature`** (`module.<id>`), also one that registers nothing with the kernel
   (`voice`, `volc`, `mail`): `TestEveryBuiltinModuleAnnouncesItsFlag` in `server/internal/modules/all`. Built out or
   switched off, its flag is gone and the clients hide their half.
-- **Client-only modules** (`modapi.ClientModules`: `glasses`, `health`, `knowledge-ui`, `screen-share`)
+- **Client-only modules** (`modapi.ClientModules`: `glasses`, `health`)
   have no server half, so the manager announces their flags itself. The `modules` settings row switches one off the
   same way (`{"disabled": ["health"]}`), which is how the owner turns a client module off from the hub without a new
   build. An id leaves the list in the PR that gives the module a server half (`TestNoBuiltinModuleIsListedAsClientOnly`).
@@ -337,9 +337,9 @@ platform compiles cannot hide a violation (`TestModuleGuardsSeeEveryBuild` prove
   Known exceptions are debt in `testdata/module_services.txt`, which only shrinks (a stale line fails): `<module id>
   <core package>` for any of the module's files, `<module id> (test) <core package>` for its tests only, no wildcards.
   The lines are the GitHub and iMessage connectors' tests, which run them through the connector registry and gate, the
-  conformance suite and the subscription service with the modules' own fixtures, and `recording internal/kb`: the recordings'
+  conformance suite and the subscription service with the modules' own fixtures, `recording internal/kb`: the recordings'
   storage (the `kb.Recording` model with its `Engine` and `Store`) stays in the knowledge base until it offers a
-  recording port. A declared core-service dependency is a known debt, not a precedent: the assistant, the hub and the
+  recording port, and `knowledge-ui internal/kb`: the history import writes into the knowledge base, the core's memory. A declared core-service dependency is a known debt, not a precedent: the assistant, the hub and the
   extension host are never listed.
 - **`TestLibrariesAreLeaves`**: the leaf libraries (`testdata/libraries.txt`) are the core's packages a module may use
   that hold no state and own no feature (localization, the extension SDK, small helpers). Each depends only on the
@@ -429,6 +429,34 @@ manifest declares `feature: module.recording`, which the kernel announces while 
   answer 404, the audio socket is unknown, the hello names none of the nine meeting and recording capabilities (so
   the hub announces none of their feature flags), no room tool is offered and no final pass or attending feeder runs
   (`TestRecordingFollowsItsModule`). The recordings already stored stay in the knowledge base.
+
+### Knowledge UI
+
+`knowledge-ui` (`server/internal/modules/knowledge-ui`, Go package `knowledgeui`, #14407) is the knowledge pages'
+pipelines that are not the core's memory (#13430 section 2): the import of the connectors' older chat history
+(`kbhistory`: the `kb_history_plan`, `kb_history_status`, `kb_history_stop` and `kb_history_resume` tools, the driver
+its loop runs, the chat lists of the selection page) and the marks of the lines a knowledge base day shows that the
+owner sent from Persona (`kbsent`, by the sent-as-user ledger). Its manifest declares `feature: module.knowledge-ui`,
+so the flag the clients gate the knowledge pages on is the kernel's to announce, no longer `modapi.ClientModules`'.
+
+- **The seam**: `server/internal/knowledgeuihost`, as recording's (`Layer`: core -> module; `Host`: module -> core,
+  in the standard library's, the knowledge base's and the contracts' types). `server/internal/modules/all/knowledgeui.go`
+  provides it under `!persona_without_knowledge_ui && !persona_core_only`; the assistant makes one layer per manager
+  (`internal/assistant/knowledge_ui.go`, `loadKnowledgeUI`) unless the `modules` row switches it off. The layer keeps
+  the import's shared state (one call in flight, the source running, the process's instance); the core keeps the
+  loop that wakes it on the knowledge base's schedule (`kbhistory_service.go`), the selection itself and its
+  candidates route, which asks the layer for the chats and what each would be read as.
+- **Shared with the core**: the knowledge base (`knowledge-ui internal/kb`, "Guards" above) and the sent-as-user row,
+  `connectorwire.SentAsUser` (`db.SentAsUser` is an alias). Prompts (`mcp/kb_history_*`) and strings stay where
+  they were.
+- **Tests**: the import's and the marks' own tests moved with them (`kbhistory`, `kbsent`); the assistant's tests of
+  the tools, the candidates route and the marked days through the Service stay in `internal/assistant`, read the
+  import's files from the knowledge base's directory and skip without the module (`needsKnowledgeUIModule`).
+- **With the module absent** (`persona_without_knowledge_ui`, `persona_core_only`, or switched off) the four
+  `kb_history_*` tools are not offered and answer as unknown, no import runs, `GET /api/v1/kb/selection/candidates`
+  answers that the source has no history (404) without asking it, a knowledge base day comes without sent marks
+  (`sent_origin` "unavailable"), and `module.knowledge-ui` is not announced (`TestKnowledgeUIFollowsItsModule`). What
+  an import wrote stays in the knowledge base.
 
 ### Lark
 

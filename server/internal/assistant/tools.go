@@ -49,7 +49,7 @@ var toolNames = []string{"resource_status", "ask_user", "notify_user", "supervis
 
 // Tools are the assistant's tools (assistant.tools).
 func (s *Service) Tools(ctx context.Context) []proto.Tool {
-	tools := toolsNamed(toolNames)
+	tools := toolsNamed(withKnowledgeUI(toolNames, s))
 	// A bare Service has no settings store and is used by registry tests. With no
 	// store the opt-in is false; do not call the nil store function just to hide it.
 	if s.store != nil && ownerReplyApprovalOn(s.settings(ctx)) {
@@ -242,7 +242,7 @@ func (s *Service) runTool(ctx context.Context, machine, self, name string, args 
 		})
 		return s.toolKB(ctx, name, args)
 	case "kb_history_plan", "kb_history_status", "kb_history_stop", "kb_history_resume":
-		return s.historyTools().Call(ctx, name, args) // kbhistory/tools.go
+		return s.historyTool(ctx, name, args) // the knowledge-ui module (knowledge_ui.go)
 	case "interaction_answer":
 		return s.toolInteractionAnswer(ctx, self, args)
 	case "ask_escalate":
