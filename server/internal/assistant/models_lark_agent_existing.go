@@ -27,10 +27,7 @@ func (s *Service) larkAgentFollowsCurrentModel(ctx context.Context, machine, sid
 		return false, nil
 	}
 	origins, ok := s.conversationOrigins()
-	if !ok {
-		return true, errors.New("the conversation origin could not be read; the message was not sent on its previous model")
-	}
-	if origins[sid].origin != OriginLarkAgent {
+	if !ok || origins[sid].origin != OriginLarkAgent {
 		return false, nil
 	}
 	binding, err := s.resolveModel(ctx, purposeLarkAgent)
