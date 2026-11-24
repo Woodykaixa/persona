@@ -735,6 +735,9 @@ identifies its loopback native service. `RevertToCascadeStep` receives `conversa
 index, including `-1` for an empty conversation. Native refusal propagates to the caller. The bridge uses the current
 native summary and replacement step indices to discard the abandoned export tail, then publishes a changed history
 token. This survives companion restarts without modifying native transcript files.
+A reused lower index is not proof of a rewind: when the export goes past the replaced steps before the replacement run
+reaches their last index, another process wrote the same conversation. The bridge then keeps both runs, ordered by
+step index (old steps first), and changes the content revision (#14626).
 
 Antigravity declares `caps.fork` for Agent and Assistant chats. `ForkConversation` keeps the existing workspace and
 copies through an inclusive native step index. The bridge resolves a reply from the exported transcript and stops
